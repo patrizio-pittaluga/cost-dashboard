@@ -3,7 +3,7 @@
 # Non modifica CloudFront né il DNS. Eseguire da CloudShell con accesso AWS.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DOMAIN="moneta.ilsitodipatrizio.com"
+DOMAIN="moneta.ilsitodipatrizio.it"
 STACK="moneta-frontend"
 CF_DOMAIN="$(aws cloudformation describe-stacks --region us-east-1 --stack-name "$STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDomain'].OutputValue | [0]" --output text)"
@@ -38,7 +38,7 @@ python3 - <<'PY'
 import json,os
 r=json.loads(os.environ['REC'])
 name=r['Name'].rstrip('.')
-zone='ilsitodipatrizio.com'
+zone='ilsitodipatrizio.it'
 suffix='.'+zone
 if not name.endswith(suffix):
     raise ValueError('Record ACM inatteso: '+name)

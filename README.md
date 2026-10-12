@@ -97,9 +97,9 @@ La suite valida logica Lambda e consistenza delle risorse, ma **non** equivale a
 
 ## 7. Gestione successiva del dominio
 
-Quando potrai accedere a GoDaddy, aggiungeremo `moneta.ilsitodipatrizio.com` e un certificato ACM gratuito per CloudFront in `us-east-1`, con record CNAME di validazione e di instradamento. GoDaddy resta registrar e gestore DNS. Questa configurazione **non** è inclusa nel deploy attuale.
+Quando potrai accedere a GoDaddy, aggiungeremo `moneta.ilsitodipatrizio.it` e un certificato ACM gratuito per CloudFront in `us-east-1`, con record CNAME di validazione e di instradamento. GoDaddy resta registrar e gestore DNS. Questa configurazione **non** è inclusa nel deploy attuale.
 
-## 8. Collegare Moneta a `moneta.ilsitodipatrizio.com` (GoDaddy, HTTPS AWS)
+## 8. Collegare Moneta a `moneta.ilsitodipatrizio.it` (GoDaddy, HTTPS AWS)
 
 Questa versione supporta il sottodominio senza richiedere Route 53 o un certificato GoDaddy. Mantiene la distribuzione CloudFront, il Cognito User Pool e le altre risorse esistenti. **Il certificato HTTPS viene emesso da AWS ACM in `us-east-1`, gratuitamente se associato a CloudFront.** Non acquistare SSL GoDaddy. Il DNS deve essere effettivamente gestito dai nameserver di GoDaddy; altrimenti aggiungi i record presso il provider DNS autorevole.
 
@@ -113,13 +113,13 @@ Da CloudShell / terminale autenticato AWS, nella root del repository aggiornato:
 
 Lo script controlla `moneta-frontend`, riutilizza un certificato pubblico ACM già esistente per il sottodominio oppure lo richiede, e mostra **l'ARN del certificato** e **i due CNAME GoDaddy**. Non scrive alcun record DNS: non abbiamo accesso all'account GoDaddy. Il record di validazione ACM è disponibile solo dopo la richiesta reale; non usare valori di esempio.
 
-Su GoDaddy: **Portfolio domini > ilsitodipatrizio.com > DNS > Aggiungi record**. Inserisci **prima** il CNAME di verifica ACM riportato dallo script, per esempio (VALORI NON REALI):
+Su GoDaddy: **Portfolio domini > ilsitodipatrizio.it > DNS > Aggiungi record**. Inserisci **prima** il CNAME di verifica ACM riportato dallo script, per esempio (VALORI NON REALI):
 
 | Tipo | Nome | Valore | TTL |
 |---|---|---|---|
 | CNAME | `_a1b2c3.moneta` | `_x1y2z3.acm-validations.aws` | predefinito |
 
-Il nome su GoDaddy è relativo al dominio, quindi **non aggiungere `ilsitodipatrizio.com` una seconda volta**. Non sostituire i record MX, A o www del sito principale. Se il record non compare ancora in ACM, riesegui lo stesso script.
+Il nome su GoDaddy è relativo al dominio, quindi **non aggiungere `ilsitodipatrizio.it` una seconda volta**. Non sostituire i record MX, A o www del sito principale. Se il record non compare ancora in ACM, riesegui lo stesso script.
 
 ### Fase B — Verificare l'emissione del certificato
 
@@ -153,10 +153,10 @@ Dal risultato di `./scripts/domain_request.sh`, copia il record restante su GoDa
 Verifica:
 
 ```bash
-nslookup moneta.ilsitodipatrizio.com
-curl -I https://moneta.ilsitodipatrizio.com
+nslookup moneta.ilsitodipatrizio.it
+curl -I https://moneta.ilsitodipatrizio.it
 ```
 
-Apri `https://moneta.ilsitodipatrizio.com` in navigazione privata e prova il login con password + MFA TOTP; verifica il caricamento del saldo e i movimenti e il logout. Non inviare qui password, codici MFA o token. L'indirizzo CloudFront AWS resta accessibile e supportato per l'accesso a Moneta (ma nessun dato è pubblico senza JWT valido).
+Apri `https://moneta.ilsitodipatrizio.it` in navigazione privata e prova il login con password + MFA TOTP; verifica il caricamento del saldo e i movimenti e il logout. Non inviare qui password, codici MFA o token. L'indirizzo CloudFront AWS resta accessibile e supportato per l'accesso a Moneta (ma nessun dato è pubblico senza JWT valido).
 
 **Promemoria sicurezza/costi:** HTTPS è gratuito con ACM e CloudFront, ma il DNS pubblico non blocca bot né rende i contenuti HTML statici privati. Moneta mantiene autenticazione Cognito/MFA e API protette con JWT; AWS Budgets resta un sistema di notifica, non un tetto di fatturazione.

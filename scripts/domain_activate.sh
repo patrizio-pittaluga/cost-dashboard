@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CERT_ARN="${1:-}"
-DOMAIN='moneta.ilsitodipatrizio.com'
+DOMAIN='moneta.ilsitodipatrizio.it'
 if [[ -z "$CERT_ARN" ]]; then
   echo 'Uso: ./scripts/domain_activate.sh arn:aws:acm:us-east-1:ACCOUNT:certificate/UUID' >&2
   exit 2
