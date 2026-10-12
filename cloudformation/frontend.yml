@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Bilancio personale - frontend global/CloudFront Free, S3 privato e WAF.
+  DEPLOY SOLO IN us-east-1. Non richiede dominio personalizzato.
+
+Resources:
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  WebOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        Description: 'Accesso firmato CloudFront verso il bucket privato'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendWaf:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${AWS::StackName}-waf'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: false
+        SampledRequestsEnabled: false
+        MetricName: bilancioFrontendWaf
+      Rules:
+        - Name: per-ip-rate-limit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 300
+              AggregateKeyType: IP
+              EvaluationWindowSec: 300
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: false
+            SampledRequestsEnabled: false
+            MetricName: bilancioRateLimit
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub 'Bilancio personale - ${AWS::StackName} - frontend privato S3'
+        Enabled: true
+        IPV6Enabled: true
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        WebACLId: !GetAtt FrontendWaf.Arn
+        Origins:
+          - Id: s3-private
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: s3-private
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # AWS managed CachingOptimized; nessuna cache policy custom (piano Free).
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CacheBehaviors:
+          - PathPattern: config.json
+            TargetOriginId: s3-private
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # Managed CachingDisabled: mai mantenere una configurazione obsoleta.
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        PriceClass: PriceClass_100
+
+  # A sottoscrizione attiva, CloudFront + WAF associata sono coperti dal piano Free.
+  # La creazione FALLISCE se l'account non e' idoneo (es. AWS Free Tier attivo).
+  CloudFrontFree:
+    Type: AWS::PricingPlanManager::Subscription
+    Properties:
+      PlanFamily: CloudFront
+      PlanTier: FREE
+      UsageLevel: DEFAULT
+      ResourceArns:
+        - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+        - !GetAtt FrontendWaf.Arn
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyDistributionCanRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: 's3:GetObject'
+            Resource: !Sub '${WebBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+Outputs:
+  WebUrl:
+    Description: URL del sito (senza GoDaddy)
+    Value: !Sub 'https://${Distribution.DomainName}/'
+  CloudFrontDomain:
+    Description: Dominio da passare al parametro CloudFrontDomain dello stack backend
+    Value: !GetAtt Distribution.DomainName
+  BucketName:
+    Value: !Ref WebBucket
+  DistributionId:
+    Value: !Ref Distribution
+  FreePlanSubscriptionArn:
+    Value: !Ref CloudFrontFree
+  FreePlanStatus:
+    Description: Deve risultare ACTIVE
+    Value: !GetAtt CloudFrontFree.Status
+  WebAclArn:
+    Value: !GetAtt FrontendWaf.Arn

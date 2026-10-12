@@ -1,0 +1,5 @@
+{
+  "apiUrl": "https://XXXXXXXX.execute-api.eu-south-1.amazonaws.com",
+  "clientId": "COGNITO_APP_CLIENT_ID",
+  "cognitoUrl": "https://PREFISSO.auth.eu-south-1.amazoncognito.com"
+}
