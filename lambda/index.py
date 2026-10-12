@@ -30,10 +30,20 @@ FREQUENCIES = frozenset(('weekly', 'monthly', 'quarterly', 'yearly'))
 class BadRequest(Exception):
     pass
 
+def json_serializer(obj):
+    """Converte i numeri DynamoDB Decimal in numeri JSON."""
+    if isinstance(obj, Decimal):
+        if not obj.is_finite():
+            raise TypeError('Decimal non finito non serializzabile')
+        if obj == obj.to_integral_value():
+            return int(obj)
+        return float(obj)
+    raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
+
 def response(status, data=None):
     out = {'statusCode': status, 'headers': {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store'}}
     if data is not None:
-        out['body'] = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        out['body'] = json.dumps(data, ensure_ascii=False, separators=(',', ':'), default=json_serializer)
     return out
 
 def body_json(event):
