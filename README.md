@@ -98,3 +98,65 @@ La suite valida logica Lambda e consistenza delle risorse, ma **non** equivale a
 ## 7. Gestione successiva del dominio
 
 Quando potrai accedere a GoDaddy, aggiungeremo `moneta.ilsitodipatrizio.com` e un certificato ACM gratuito per CloudFront in `us-east-1`, con record CNAME di validazione e di instradamento. GoDaddy resta registrar e gestore DNS. Questa configurazione **non** è inclusa nel deploy attuale.
+
+## 8. Collegare Moneta a `moneta.ilsitodipatrizio.com` (GoDaddy, HTTPS AWS)
+
+Questa versione supporta il sottodominio senza richiedere Route 53 o un certificato GoDaddy. Mantiene la distribuzione CloudFront, il Cognito User Pool e le altre risorse esistenti. **Il certificato HTTPS viene emesso da AWS ACM in `us-east-1`, gratuitamente se associato a CloudFront.** Non acquistare SSL GoDaddy. Il DNS deve essere effettivamente gestito dai nameserver di GoDaddy; altrimenti aggiungi i record presso il provider DNS autorevole.
+
+### Fase A — Richiedere il certificato, leggere i CNAME
+
+Da CloudShell / terminale autenticato AWS, nella root del repository aggiornato:
+
+```bash
+./scripts/domain_request.sh
+```
+
+Lo script controlla `moneta-frontend`, riutilizza un certificato pubblico ACM già esistente per il sottodominio oppure lo richiede, e mostra **l'ARN del certificato** e **i due CNAME GoDaddy**. Non scrive alcun record DNS: non abbiamo accesso all'account GoDaddy. Il record di validazione ACM è disponibile solo dopo la richiesta reale; non usare valori di esempio.
+
+Su GoDaddy: **Portfolio domini > ilsitodipatrizio.com > DNS > Aggiungi record**. Inserisci **prima** il CNAME di verifica ACM riportato dallo script, per esempio (VALORI NON REALI):
+
+| Tipo | Nome | Valore | TTL |
+|---|---|---|---|
+| CNAME | `_a1b2c3.moneta` | `_x1y2z3.acm-validations.aws` | predefinito |
+
+Il nome su GoDaddy è relativo al dominio, quindi **non aggiungere `ilsitodipatrizio.com` una seconda volta**. Non sostituire i record MX, A o www del sito principale. Se il record non compare ancora in ACM, riesegui lo stesso script.
+
+### Fase B — Verificare l'emissione del certificato
+
+```bash
+aws acm describe-certificate \
+  --region us-east-1 \
+  --certificate-arn 'ARN_RESTITUITO_DALLO_SCRIPT' \
+  --query 'Certificate.Status' --output text
+```
+
+Prosegui **solo quando mostra `ISSUED`**. DNS e ACM potrebbero richiedere tempo. Puoi mantenere per sempre il CNAME di verifica, utile per il rinnovo automatico.
+
+### Fase C — Attivare CloudFront + Cognito + CORS senza reinstallare
+
+```bash
+./scripts/domain_activate.sh 'ARN_RESTITUITO_DALLO_SCRIPT'
+```
+
+Lo script rifiuta certificati non emessi o intestati a un dominio diverso. Aggiorna **gli stessi** stack `moneta-frontend` (`us-east-1`) e `moneta-backend` (`eu-south-1`), aggiungendo l'alias a CloudFront e l'URL HTTPS alle liste Cognito di callback/logout e alle origini CORS. Mantiene inoltre gli URL CloudFront già consentiti. Pubblica nuovamente i file statici e invalida la cache. Non sostituisce l'User Pool.
+
+### Fase D — Inserire il CNAME che indirizza al sito
+
+Dal risultato di `./scripts/domain_request.sh`, copia il record restante su GoDaddy (valore di esempio NON REALE):
+
+| Tipo | Nome | Valore | TTL |
+|---|---|---|---|
+| CNAME | `moneta` | `dxxxxxxxxxxxxx.cloudfront.net` | predefinito |
+
+**Non creare record A verso un indirizzo IP di CloudFront.** Se esiste già un record `moneta`, correggi il conflitto prima di aggiungere il CNAME. Il CNAME non serve per il dominio root, che resta invariato.
+
+Verifica:
+
+```bash
+nslookup moneta.ilsitodipatrizio.com
+curl -I https://moneta.ilsitodipatrizio.com
+```
+
+Apri `https://moneta.ilsitodipatrizio.com` in navigazione privata e prova il login con password + MFA TOTP; verifica il caricamento del saldo e i movimenti e il logout. Non inviare qui password, codici MFA o token. L'indirizzo CloudFront AWS resta accessibile e supportato per l'accesso a Moneta (ma nessun dato è pubblico senza JWT valido).
+
+**Promemoria sicurezza/costi:** HTTPS è gratuito con ACM e CloudFront, ma il DNS pubblico non blocca bot né rende i contenuti HTML statici privati. Moneta mantiene autenticazione Cognito/MFA e API protette con JWT; AWS Budgets resta un sistema di notifica, non un tetto di fatturazione.

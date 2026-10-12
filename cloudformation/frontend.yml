@@ -1,7 +1,32 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   Moneta - frontend CloudFront pay-as-you-go, S3 privato, senza WAF.
-  DEPLOY SOLO IN us-east-1. Non richiede dominio personalizzato.
+  DEPLOY SOLO IN us-east-1. Il dominio personalizzato e opzionale.
+
+Parameters:
+  CustomDomainName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.com$'
+    Description: 'Alias HTTPS CloudFront (lascia vuoto per il solo dominio AWS)'
+  CustomCertificateArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F-]+$'
+    Description: 'ARN del certificato ACM ISSUED in us-east-1 per CustomDomainName'
+Rules:
+  DomainAndCertificateTogether:
+    Assertions:
+      - Assert: !Or
+          - !And
+              - !Equals [!Ref CustomDomainName, '']
+              - !Equals [!Ref CustomCertificateArn, '']
+          - !And
+              - !Not [!Equals [!Ref CustomDomainName, '']]
+              - !Not [!Equals [!Ref CustomCertificateArn, '']]
+        AssertDescription: 'Indica sia CustomDomainName sia CustomCertificateArn oppure nessuno dei due.'
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, '']]
 
 Resources:
   WebBucket:
@@ -41,6 +66,10 @@ Resources:
         IPV6Enabled: true
         HttpVersion: http2
         DefaultRootObject: index.html
+        Aliases: !If
+          - HasCustomDomain
+          - [!Ref CustomDomainName]
+          - !Ref 'AWS::NoValue' 
         Origins:
           - Id: s3-private
             DomainName: !GetAtt WebBucket.RegionalDomainName
@@ -64,8 +93,12 @@ Resources:
             Compress: true
             # Managed CachingDisabled: mai mantenere una configurazione obsoleta.
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref CustomCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
         PriceClass: PriceClass_100
 
   BucketPolicy:
@@ -87,8 +120,11 @@ Resources:
 
 Outputs:
   WebUrl:
-    Description: URL del sito (senza GoDaddy)
-    Value: !Sub 'https://${Distribution.DomainName}/'
+    Description: URL principale del sito
+    Value: !If
+      - HasCustomDomain
+      - !Sub 'https://${CustomDomainName}/'
+      - !Sub 'https://${Distribution.DomainName}/'
   CloudFrontDomain:
     Description: Dominio da passare al parametro CloudFrontDomain dello stack backend
     Value: !GetAtt Distribution.DomainName

@@ -7,6 +7,10 @@ cd "$(dirname "$0")/.."
 FRONTEND_STACK="moneta-frontend"
 BACKEND_STACK="moneta-backend"
 COGNITO_PREFIX="${COGNITO_PREFIX:-}"
+# Le variabili possono essere impostate per il primo deploy o lette dagli stack esistenti
+# nei successivi deploy: evita di rimuovere l'alias quando non sono esportate.
+MONETA_CUSTOM_DOMAIN="${MONETA_CUSTOM_DOMAIN:-}"
+MONETA_ACM_CERT_ARN="${MONETA_ACM_CERT_ARN:-}"
 
 # Evita due installazioni attive (e costi doppi) se i vecchi stack sono ancora presenti.
 for target in 'us-east-1:bilancio-frontend' 'eu-south-1:bilancio-backend'; do
@@ -22,20 +26,44 @@ for target in 'us-east-1:bilancio-frontend' 'eu-south-1:bilancio-backend'; do
   fi
 done
 
+# Mantiene il prefisso Cognito dello stack attuale per non sostituire il dominio Hosted UI.
+# Su prima installazione usa moneta-<account-id>.
 if [[ -z "$COGNITO_PREFIX" ]]; then
-  ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-  COGNITO_PREFIX="moneta-${ACCOUNT_ID}"
+  COGNITO_PREFIX="$(aws cloudformation describe-stacks --region eu-south-1 --stack-name "$BACKEND_STACK" \
+    --query "Stacks[0].Parameters[?ParameterKey=='CognitoDomainPrefix'].ParameterValue | [0]" --output text 2>/dev/null || true)"
+  if [[ -z "$COGNITO_PREFIX" || "$COGNITO_PREFIX" == 'None' ]]; then
+    ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+    COGNITO_PREFIX="moneta-${ACCOUNT_ID}"
+  fi
 fi
 
 printf 'Moneta: deploy stack %s e %s.\n' "$FRONTEND_STACK" "$BACKEND_STACK"
 printf '%s\n' '[1/5] Rigenerazione del template Python...'
 python3 scripts/sync_lambda.py
 
-printf '%s\n' '[2/5] CloudFront pay-as-you-go e S3 privato (us-east-1)...'
+# Conserva i parametri del dominio nei deploy successivi.
+get_stack_parameter() {
+  local value
+  value="$(aws cloudformation describe-stacks --region "$1" --stack-name "$2" \
+    --query "Stacks[0].Parameters[?ParameterKey=='$3'].ParameterValue | [0]" --output text 2>/dev/null || true)"
+  if [[ "$value" != "None" && "$value" != "" ]]; then printf '%s' "$value"; fi
+}
+if [[ -z "$MONETA_CUSTOM_DOMAIN" ]]; then
+  MONETA_CUSTOM_DOMAIN="$(get_stack_parameter us-east-1 "$FRONTEND_STACK" CustomDomainName)"
+fi
+if [[ -z "$MONETA_ACM_CERT_ARN" ]]; then
+  MONETA_ACM_CERT_ARN="$(get_stack_parameter us-east-1 "$FRONTEND_STACK" CustomCertificateArn)"
+fi
+if [[ -n "$MONETA_CUSTOM_DOMAIN" && -z "$MONETA_ACM_CERT_ARN" ]] || [[ -z "$MONETA_CUSTOM_DOMAIN" && -n "$MONETA_ACM_CERT_ARN" ]]; then
+  echo 'ERRORE: MONETA_CUSTOM_DOMAIN e MONETA_ACM_CERT_ARN devono essere impostati insieme.' >&2
+  exit 2
+fi
+printf '%s\n' '[2/5] CloudFront pay-as-you-go e S3 privato (us-east-1)...' 
 aws cloudformation deploy \
   --region us-east-1 \
   --stack-name "$FRONTEND_STACK" \
   --template-file cloudformation/frontend.yml \
+  --parameter-overrides "CustomDomainName=$MONETA_CUSTOM_DOMAIN" "CustomCertificateArn=$MONETA_ACM_CERT_ARN" \
   --no-fail-on-empty-changeset
 
 get_output() {
@@ -52,7 +80,7 @@ aws cloudformation deploy \
   --stack-name "$BACKEND_STACK" \
   --template-file cloudformation/backend.yml \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" \
+  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" "CustomDomainName=$MONETA_CUSTOM_DOMAIN" \
   --no-fail-on-empty-changeset
 
 API_URL="$(get_output eu-south-1 "$BACKEND_STACK" ApiUrl)"
@@ -82,8 +110,12 @@ aws s3 cp frontend/config.json "s3://$BUCKET/config.json" \
   --cache-control 'no-store'
 aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths '/*' > /dev/null
 
-printf '\nDEPLOY COMPLETATO (o stack aggiornati).\nMoneta: https://%s/\n' "$DOMAIN"
+printf '\nDEPLOY COMPLETATO (o stack aggiornati).\n'
+if [[ -n "$MONETA_CUSTOM_DOMAIN" ]]; then
+  printf 'Moneta (dominio personalizzato): https://%s/\n' "$MONETA_CUSTOM_DOMAIN"
+fi
+printf 'Moneta (CloudFront AWS): https://%s/\n' "$DOMAIN"
 printf 'UserPool (Milano): %s\n' "$USER_POOL_ID"
 printf 'API (Milano): %s\n' "$API_URL"
 printf 'CloudFront: pay-as-you-go, senza WAF.\n'
-printf 'PROSSIMO PASSO: crea un nuovo utente Cognito da Console e configura MFA TOTP (il vecchio utente non viene migrato).\n'
+printf 'Utenti Cognito esistenti preservati durante gli aggiornamenti CloudFormation.\n'

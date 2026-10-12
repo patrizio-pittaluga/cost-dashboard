@@ -8,12 +8,20 @@ Parameters:
     Type: String
     Description: 'Valore Output CloudFrontDomain dello stack frontend (es. d123abc.cloudfront.net)'
     AllowedPattern: '^[a-z0-9-]+\.cloudfront\.net$'
+  CustomDomainName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.com$'
+    Description: 'Dominio personalizzato per redirect OAuth e CORS'
   CognitoDomainPrefix:
     Type: String
     MinLength: 4
     MaxLength: 63
     AllowedPattern: '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])$'
     Description: 'Prefisso pubblico Cognito univoco nella regione'
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, '']]
 
 Resources:
   UserPool:
@@ -58,8 +66,10 @@ Resources:
       AllowedOAuthScopes: [openid, email]
       CallbackURLs:
         - !Sub 'https://${CloudFrontDomain}/'
+        - !If [HasCustomDomain, !Sub 'https://${CustomDomainName}/', !Ref 'AWS::NoValue']
       LogoutURLs:
         - !Sub 'https://${CloudFrontDomain}/'
+        - !If [HasCustomDomain, !Sub 'https://${CustomDomainName}/', !Ref 'AWS::NoValue']
       AccessTokenValidity: 30
       IdTokenValidity: 30
       TokenValidityUnits:
@@ -486,6 +496,7 @@ Resources:
       CorsConfiguration:
         AllowOrigins:
           - !Sub 'https://${CloudFrontDomain}'
+          - !If [HasCustomDomain, !Sub 'https://${CustomDomainName}', !Ref 'AWS::NoValue']
         AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
         AllowHeaders: [authorization, content-type]
         MaxAge: 3600
