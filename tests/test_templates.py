@@ -29,10 +29,11 @@ def read_template(name):
 
 
 class TestTemplates(unittest.TestCase):
-    def test_frontend_free_s3_private(self):
+    def test_frontend_payg_s3_private(self):
         x=read_template('frontend.yml')['Resources']
-        self.assertEqual(x['CloudFrontFree']['Properties']['PlanTier'],'FREE')
-        self.assertEqual(x['FrontendWaf']['Properties']['Scope'],'CLOUDFRONT')
+        self.assertNotIn('CloudFrontFree',x)
+        self.assertNotIn('FrontendWaf',x)
+        self.assertNotIn('WebACLId',x['Distribution']['Properties']['DistributionConfig'])
         self.assertEqual(x['WebBucket']['Properties']['PublicAccessBlockConfiguration']['BlockPublicPolicy'],True)
         self.assertIn('OriginAccessControlId',x['Distribution']['Properties']['DistributionConfig']['Origins'][0])
 

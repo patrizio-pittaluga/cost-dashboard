@@ -15,7 +15,7 @@ fi
 printf '%s\n' '[1/5] Rigenerazione del template Python...'
 python3 scripts/sync_lambda.py
 
-printf '%s\n' '[2/5] CloudFront FREE, WAF e S3 privato (us-east-1)...'
+printf '%s\n' '[2/5] CloudFront pay-as-you-go e S3 privato (us-east-1)...'
 aws cloudformation deploy \
   --region us-east-1 \
   --stack-name "$FRONTEND_STACK" \
@@ -30,11 +30,6 @@ get_output() {
 DOMAIN="$(get_output us-east-1 "$FRONTEND_STACK" CloudFrontDomain)"
 BUCKET="$(get_output us-east-1 "$FRONTEND_STACK" BucketName)"
 DISTRIBUTION="$(get_output us-east-1 "$FRONTEND_STACK" DistributionId)"
-PLAN_STATUS="$(get_output us-east-1 "$FRONTEND_STACK" FreePlanStatus)"
-if [[ "$PLAN_STATUS" != ACTIVE ]]; then
-  echo "ATTENZIONE: piano CloudFront Free: $PLAN_STATUS. Controlla la sottoscrizione prima di usare il sito." >&2
-fi
-
 printf '%s\n' '[3/5] Cognito, API HTTP, Lambda Python, DynamoDB (eu-south-1 Milano)...'
 aws cloudformation deploy \
   --region eu-south-1 \
@@ -74,5 +69,5 @@ aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths '/*
 printf '\nDEPLOY COMPLETATO (o stack aggiornati).\nSito: https://%s/\n' "$DOMAIN"
 printf 'UserPool (Milano): %s\n' "$USER_POOL_ID"
 printf 'API (Milano): %s\n' "$API_URL"
-printf 'Piano CloudFront Free: %s\n' "$PLAN_STATUS"
+printf 'CloudFront: pay-as-you-go, senza WAF.\n'
 printf 'PROSSIMO PASSO: crea manualmente un singolo utente Cognito da Console, poi completa MFA.\n'

@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Bilancio personale - frontend global/CloudFront Free, S3 privato e WAF.
+  Bilancio personale - frontend CloudFront pay-as-you-go, S3 privato, senza WAF.
   DEPLOY SOLO IN us-east-1. Non richiede dominio personalizzato.
 
 Resources:
@@ -32,32 +32,6 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
-  FrontendWaf:
-    Type: AWS::WAFv2::WebACL
-    Properties:
-      Name: !Sub '${AWS::StackName}-waf'
-      Scope: CLOUDFRONT
-      DefaultAction:
-        Allow: {}
-      VisibilityConfig:
-        CloudWatchMetricsEnabled: false
-        SampledRequestsEnabled: false
-        MetricName: bilancioFrontendWaf
-      Rules:
-        - Name: per-ip-rate-limit
-          Priority: 0
-          Action:
-            Block: {}
-          Statement:
-            RateBasedStatement:
-              Limit: 300
-              AggregateKeyType: IP
-              EvaluationWindowSec: 300
-          VisibilityConfig:
-            CloudWatchMetricsEnabled: false
-            SampledRequestsEnabled: false
-            MetricName: bilancioRateLimit
-
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -67,7 +41,6 @@ Resources:
         IPV6Enabled: true
         HttpVersion: http2
         DefaultRootObject: index.html
-        WebACLId: !GetAtt FrontendWaf.Arn
         Origins:
           - Id: s3-private
             DomainName: !GetAtt WebBucket.RegionalDomainName
@@ -80,7 +53,7 @@ Resources:
           AllowedMethods: [GET, HEAD]
           CachedMethods: [GET, HEAD]
           Compress: true
-          # AWS managed CachingOptimized; nessuna cache policy custom (piano Free).
+          # AWS managed CachingOptimized.
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
         CacheBehaviors:
           - PathPattern: config.json
@@ -94,18 +67,6 @@ Resources:
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
         PriceClass: PriceClass_100
-
-  # A sottoscrizione attiva, CloudFront + WAF associata sono coperti dal piano Free.
-  # La creazione FALLISCE se l'account non e' idoneo (es. AWS Free Tier attivo).
-  CloudFrontFree:
-    Type: AWS::PricingPlanManager::Subscription
-    Properties:
-      PlanFamily: CloudFront
-      PlanTier: FREE
-      UsageLevel: DEFAULT
-      ResourceArns:
-        - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
-        - !GetAtt FrontendWaf.Arn
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -135,10 +96,3 @@ Outputs:
     Value: !Ref WebBucket
   DistributionId:
     Value: !Ref Distribution
-  FreePlanSubscriptionArn:
-    Value: !Ref CloudFrontFree
-  FreePlanStatus:
-    Description: Deve risultare ACTIVE
-    Value: !GetAtt CloudFrontFree.Status
-  WebAclArn:
-    Value: !GetAtt FrontendWaf.Arn

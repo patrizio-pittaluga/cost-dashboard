@@ -1,20 +1,18 @@
-# Bilancio personale AWS — Milano + CloudFront Free
+# Bilancio personale AWS — Milano + CloudFront pay-as-you-go senza WAF
 
 Tre stack CloudFormation indipendenti. Repository pronto per Git.
 
 | Stack | Regione | Contenuto |
 |---|---|---|
 | `bilancio-budget` | `us-east-1` | Budget mensile dell'intero account AWS, notifiche email |
-| `bilancio-frontend` | `us-east-1` | CloudFront Free, WAF globale, S3 privato + OAC |
+| `bilancio-frontend` | `us-east-1` | CloudFront pay-as-you-go senza WAF, S3 privato + OAC (senza WAF) |
 | `bilancio-backend` | `eu-south-1` **Milano** | Cognito Lite, HTTP API, Lambda **Python 3.13**, DynamoDB |
 
 Il dominio personalizzato (`spese.ilsitodipatrizio.it` su GoDaddy) è volutamente rimandato. Il primo indirizzo HTTPS sarà `https://d...cloudfront.net/`.
 
 ## 0. Prerequisiti
 
-- Account AWS che abbia abilitato Milano (`eu-south-1`). Credenziali AWS CLI configurate con permessi per creare le risorse CloudFormation/IAM/Cognito/DynamoDB/API/Lambda/CloudFront/WAF/S3/Budgets/PricingPlanManager.
 - AWS CLI v2, Bash, Python 3.9+ sul computer di deploy. `python3 -m unittest discover -s tests -v` usa anche `boto3` e `PyYAML` installati localmente. **Non** servono queste due librerie per lanciare il deploy.
-- Account *idoneo* al piano CloudFront Free. Se l'account è nel programma AWS Free Tier o non è idoneo per altri motivi, lo stack `bilancio-frontend` può fallire. **Il template non converte automaticamente la distribuzione in pay-as-you-go.** Prima del deploy vedere [AWS flat-rate CloudFront](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/flat-rate-pricing-plan.html).
 - La regione `eu-south-1` deve essere abilitata per l'account; il solo DNS è rimandato.
 
 ## 1. Budget PRIMA di creare le altre risorse
@@ -36,7 +34,6 @@ Imposta **4 USD/mese sull'intero account**, avvisi al 50%, 75%, 100% e prevision
 Lo script:
 
 1. Copia `lambda/index.py` (sorgente modificabile) nella proprietà inline `Code.ZipFile` di `cloudformation/backend.yml` tramite `scripts/sync_lambda.py`.
-2. Distribuisce `cloudformation/frontend.yml` in `us-east-1`: bucket S3 senza accesso pubblico, OAC CloudFront, WAF e `AWS::PricingPlanManager::Subscription` con `PlanTier: FREE`.
 3. Legge l'output `CloudFrontDomain` e lo passa come parametro a `cloudformation/backend.yml`, distribuito **solo in Milano** con `--capabilities CAPABILITY_IAM`.
 4. Genera `frontend/config.json` con URL API e configurazione **pubblica** Cognito, carica HTML/JS in S3, invalida la cache CloudFront.
 5. Stampa URL del sito, nome User Pool e URL API.
@@ -99,11 +96,9 @@ Modifica `lambda/index.py` e rilancia `./scripts/deploy.sh`. Questo genera il co
 
 ## 5. Costi e limitazioni
 
-Obiettivo: **meno di 5 EUR al mese** con un solo utente, traffico ridotto, pochi movimenti e nessun altro carico AWS. Non esiste una garanzia di spesa massima. CloudFront Free si applica soltanto se la sottoscrizione risulta **ACTIVE**, e l'account soddisfa i requisiti. AWS WAF/CloudFront coperti dal piano (nell'ambito delle funzionalità e delle quote previste). Altri servizi come Cognito, DynamoDB, Lambda, API Gateway e log sono fatturati separatamente oltre eventuali free tier. Non abbiamo ALB, NAT Gateway, EC2, RDS né SMS MFA.
 
 DynamoDB **PROVISIONED 5 RCU / 5 WCU** sfrutta il free tier di 25 unità di ciascun tipo a livello di regione/payer account, purché queste non siano già consumate da altre tabelle. Impostazione volutamente semplice per un utente. In caso di carico elevato può essere necessario aumentare la capacità (con costi). Non è presente backup automatico: usa il pulsante **Esporta JSON** della dashboard. L'export non è una funzione di ripristino.
 
-**CloudFront Free può non essere disponibile sul tuo account.** In quel caso, fermati e controlla i requisiti prima di scegliere un diverso piano. Non impostare PRO: comporterebbe un costo fisso contrario al budget.
 
 ## 6. GoDaddy / dominio personalizzato (solo in futuro)
 
@@ -126,3 +121,6 @@ node --check frontend/app.js
 ```
 
 I test coprono letture senza JWT, ID token scartati, client estranei, separazione per utente e operazioni CRUD. **Non sostituiscono** la validazione CloudFormation e il test end-to-end nel tuo account. Per una verifica AWS senza deploy puoi usare `aws cloudformation validate-template --region ... --template-body file://...` per ogni template. La validazione non dimostra che il tuo account sia idoneo al piano Free.
+
+## Variante PAYG e controllo costi
+Il frontend usa CloudFront a consumo senza Web ACL AWS WAF e senza PricingPlanManager. Il budget AWS è un avviso, NON un limite di fatturazione. Per il tuo tetto di 4 EUR complessivi, imposta prudentemente `MonthlyLimitUSD=3` (conversione e imposte possono variare). Evita di abilitare WAF, CloudFront real-time logs, NAT Gateway, ALB e SMS Cognito. Verifica ogni settimana AWS Cost Explorer e gli avvisi budget. Il free tier standard CloudFront può ridurre o azzerare i costi per traffico personale, ma non garantisce una spesa massima.

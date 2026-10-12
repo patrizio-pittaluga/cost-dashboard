@@ -8,8 +8,8 @@ Parameters:
     AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
   MonthlyLimitUSD:
     Type: Number
-    Description: 'Soglia mensile in USD (4 USD prudenziali rispetto a 5 EUR).'
-    Default: 4
+    Description: 'Soglia mensile in USD (3 USD prudenziali rispetto a 4 EUR).'
+    Default: 3
     MinValue: 1
     MaxValue: 100
 
