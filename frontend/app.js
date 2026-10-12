@@ -1,147 +1,68 @@
-/* Dashboard privata: OAuth 2 Authorization Code + PKCE, nessuna password nel frontend.
- * Token di accesso soltanto nella sessione del browser (non in localStorage).
- * L'API valida firma, issuer, audience e token_use a ogni richiesta.
- */
 'use strict';
 (() => {
-  const CATS = ['Casa','Alimentari','Trasporti','Bollette','Salute','Svago','Shopping','Altro'];
-  const INCOME = ['Stipendio','Extra','Rimborsi','Altre entrate'];
-  const DEFAULT_BUDGETS = { Casa:700, Alimentari:400, Trasporti:180, Bollette:220, Salute:100, Svago:160, Shopping:140, Altro:100 };
-  const $ = id => document.getElementById(id);
-  const money = n => new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR'}).format(Number(n)||0);
-  const html = s => String(s??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
-  const base64url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  let config, token = null, state = { transactions:[], budgets:{} }, month = new Date(), editId = null, busy = false;
-  month.setDate(1);
-  const callbackUrl = () => location.origin + '/';
-  function showError(message) { $('errorBanner').textContent = message; $('errorBanner').classList.remove('hidden'); }
-  function clearError() { $('errorBanner').classList.add('hidden'); }
-  function jwtExpired(jwt) {
-    try { const part=jwt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'); const claims=JSON.parse(atob(part)); return claims.exp*1000 <= Date.now()+15000; }
-    catch { return true; }
-  }
-  async function login() {
-    const bytes=crypto.getRandomValues(new Uint8Array(32));
-    const verifier=base64url(bytes);
-    const sha=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)));
-    const stateValue=base64url(crypto.getRandomValues(new Uint8Array(24)));
-    sessionStorage.setItem('bilancio-pkce', verifier);
-    sessionStorage.setItem('bilancio-state', stateValue);
-    const query=new URLSearchParams({response_type:'code',client_id:config.clientId,redirect_uri:callbackUrl(),scope:'openid email',state:stateValue,code_challenge:base64url(sha),code_challenge_method:'S256'});
-    location.assign(config.cognitoUrl+'/oauth2/authorize?'+query);
-  }
-  async function processCallback() {
-    const query=new URLSearchParams(location.search);
-    if (query.has('error')) throw Error('Cognito: '+(query.get('error_description')||query.get('error')));
-    if (!query.has('code')) return;
-    const verifier=sessionStorage.getItem('bilancio-pkce');
-    const savedState=sessionStorage.getItem('bilancio-state');
-    const correct=Boolean(verifier && savedState && savedState===query.get('state'));
-    sessionStorage.removeItem('bilancio-pkce');
-    sessionStorage.removeItem('bilancio-state');
-    history.replaceState({},'',location.pathname);
-    if (!correct) throw Error('Risposta di autenticazione non valida (state/PKCE).');
-    const body=new URLSearchParams({grant_type:'authorization_code',client_id:config.clientId,code:query.get('code'),code_verifier:verifier,redirect_uri:callbackUrl()});
-    const res=await fetch(config.cognitoUrl+'/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
-    const data=await res.json();
-    if(!res.ok || !data.access_token) throw Error('Impossibile completare l’accesso: '+(data.error||res.status));
-    token=data.access_token;
-    sessionStorage.setItem('bilancio-token',token);
-  }
-  function logout() {
-    sessionStorage.removeItem('bilancio-token');
-    token=null;
-    location.assign(config.cognitoUrl+'/logout?'+new URLSearchParams({client_id:config.clientId,logout_uri:callbackUrl()}));
-  }
-  async function api(path,method='GET',data) {
-    if(!token || jwtExpired(token)) { sessionStorage.removeItem('bilancio-token'); throw Error('Sessione scaduta. Esci e accedi di nuovo.'); }
-    const response=await fetch(config.apiUrl+path,{method,headers:{Authorization:'Bearer '+token,...(data===undefined?{}:{'Content-Type':'application/json'})},body:data===undefined?undefined:JSON.stringify(data),cache:'no-store'});
-    if(response.status===204) return null;
-    const body=await response.json().catch(()=>({}));
-    if(!response.ok) throw Error(body.error||('Errore API '+response.status));
-    return body;
-  }
-  async function reload() {
-    clearError();
-    try {
-      const value=await api('/state');
-      state={transactions:Array.isArray(value.transactions)?value.transactions:[],budgets:{...DEFAULT_BUDGETS,...(value.budgets||{})}};
-      render();
-    } catch(e) { showError(e.message); }
-  }
-  const monthKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-  const txMonth = key => state.transactions.filter(t => t.date.slice(0,7)===key);
-  const sum = (items,type) => items.filter(x=>x.type===type).reduce((a,t)=>a+Number(t.amount),0);
-  function render() {
-    const key=monthKey(month), items=txMonth(key), income=sum(items,'income'), expense=sum(items,'expense');
-    $('monthLabel').textContent=month.toLocaleDateString('it-IT',{month:'long',year:'numeric'});
-    $('incomeTotal').textContent=money(income);$('expenseTotal').textContent=money(expense);$('balanceTotal').textContent=money(income-expense);
-    const data=[];
-    for(let i=5;i>=0;i--){const d=new Date(month.getFullYear(),month.getMonth()-i,1);const m=txMonth(monthKey(d));data.push({name:d.toLocaleDateString('it-IT',{month:'short'}),inc:sum(m,'income'),exp:sum(m,'expense')});}
-    const maximum=Math.max(1,...data.flatMap(d=>[d.inc,d.exp]));
-    $('chart').innerHTML=data.map(d=>`<div class="chart-col"><div class="bars"><div class="bar exp" style="height:${Math.max(2,d.exp/maximum*125)}px" title="Uscite ${money(d.exp)}"></div><div class="bar inc" style="height:${Math.max(2,d.inc/maximum*125)}px" title="Entrate ${money(d.inc)}"></div></div><span>${html(d.name)}</span></div>`).join('');
-    $('budgetRows').innerHTML=CATS.map(cat=>{const limit=Number(state.budgets[cat]||0),spent=sum(items.filter(t=>t.category===cat),'expense'),percent=limit?spent/limit*100:0;
-      return `<div class="budget"><div class="budget-head"><label>${html(cat)}</label><input aria-label="Budget ${html(cat)}" class="input budget-input" type="number" min="0" max="100000000" step="0.01" data-budget="${html(cat)}" value="${limit}"></div><div class="track"><div class="fill ${percent>100?'over':''}" style="width:${Math.min(100,percent)}%"></div></div><div class="muted">${money(spent)} di ${money(limit)}</div></div>`;}).join('');
-    const sorted=[...items].sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
-    $('transactionRows').innerHTML=sorted.length?`<table class="table"><thead><tr><th>Data</th><th>Descrizione</th><th>Categoria</th><th class="right">Importo</th><th class="right">Azioni</th></tr></thead><tbody>${sorted.map(t=>`<tr><td>${html(t.date)}</td><td>${html(t.description)}</td><td>${html(t.category)}</td><td class="right" style="color:${t.type==='expense'?'var(--red)':'var(--green)'}">${t.type==='expense'?'-':'+'}${money(t.amount)}</td><td class="right"><button data-edit="${html(t.id)}">Modifica</button> <button data-delete="${html(t.id)}">Elimina</button></td></tr>`).join('')}</tbody></table>`:'<p class="empty">Nessun movimento per questo mese.</p>';
-  }
-  function updateCategories() {
-    const type=$('txType').value,values=type==='expense'?CATS:INCOME;
-    const selected=$('txCategory').value;
-    $('txCategory').innerHTML=values.map(v=>`<option value="${html(v)}">${html(v)}</option>`).join('');
-    if(values.includes(selected)) $('txCategory').value=selected;
-  }
-  function editTx(id=null) {
-    editId=id;const t=state.transactions.find(x=>x.id===id);
-    $('txForm').reset();$('dialogTitle').textContent=t?'Modifica movimento':'Nuovo movimento';
-    $('txType').value=t?.type||'expense';updateCategories();
-    $('txDescription').value=t?.description||'';$('txAmount').value=t?.amount??'';
-    const today=new Date();const localDay=`${monthKey(today)}-${String(today.getDate()).padStart(2,'0')}`;
-    $('txDate').value=t?.date||(monthKey(today)===monthKey(month)?localDay:monthKey(month)+'-01');
-    $('txCategory').value=t?.category||($('txType').value==='expense'?CATS[0]:INCOME[0]);$('txNote').value=t?.note||'';
-    $('txDialog').showModal();
-  }
-  async function runMutation(fn) {
-    if(busy)return;busy=true;clearError();
-    try { await fn();await reload(); } catch(e) { showError(e.message); }
-    finally {busy=false;}
-  }
-  function download(name,text,mime) {
-    const a=document.createElement('a'),url=URL.createObjectURL(new Blob([text],{type:mime}));a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);
-  }
-  function exportCsv() {
-    const safe=s=>{const x=String(s??'');return '"'+(/^[\s]*[=+@-]/.test(x)?"'"+x:x).replace(/"/g,'""')+'"';};
-    const rows=[['Data','Tipo','Descrizione','Categoria','Importo EUR','Note'],...state.transactions.map(t=>[t.date,t.type,t.description,t.category,t.amount,t.note])];
-    download('bilancio-movimenti.csv',rows.map(r=>r.map(safe).join(';')).join('\r\n'),'text/csv;charset=utf-8');
-  }
-  function bind() {
-    $('loginButton').onclick=()=>login().catch(e=>$('loginMessage').textContent=e.message);
-    $('logoutButton').onclick=logout;
-    $('refreshButton').onclick=reload;$('addButton').onclick=()=>editTx();
-    $('prevMonth').onclick=()=>{month=new Date(month.getFullYear(),month.getMonth()-1,1);render();};
-    $('nextMonth').onclick=()=>{month=new Date(month.getFullYear(),month.getMonth()+1,1);render();};
-    $('txType').onchange=updateCategories;$('cancelTx').onclick=()=>$('txDialog').close();
-    $('txForm').addEventListener('submit',e=>{e.preventDefault();const val={id:editId||'tx-'+crypto.randomUUID(),type:$('txType').value,description:$('txDescription').value.trim(),amount:Number($('txAmount').value),date:$('txDate').value,category:$('txCategory').value,note:$('txNote').value.trim()};
-      if(!Number.isFinite(val.amount)||val.amount<=0||!val.description)return;
-      runMutation(async()=>{await api(editId?'/transactions/'+encodeURIComponent(editId):'/transactions',editId?'PUT':'POST',val);$('txDialog').close();});});
-    $('transactionRows').addEventListener('click',e=>{const a=e.target.closest('[data-edit]'),b=e.target.closest('[data-delete]');if(a)editTx(a.dataset.edit);if(b&&confirm('Eliminare questo movimento?'))runMutation(()=>api('/transactions/'+encodeURIComponent(b.dataset.delete),'DELETE'));});
-    $('budgetRows').addEventListener('change',e=>{const el=e.target.closest('[data-budget]');if(!el)return;const amount=Number(el.value);if(!Number.isFinite(amount)||amount<0||amount>100000000){showError('Budget non valido');render();return;}runMutation(()=>api('/budgets/'+encodeURIComponent(el.dataset.budget),'PUT',{amount}));});
-    $('exportJson').onclick=()=>download('bilancio-backup.json',JSON.stringify({...state,exportedAt:new Date().toISOString(),version:2},null,2),'application/json');
-    $('exportCsv').onclick=exportCsv;
-  }
-  async function start() {
-    bind();
-    try {
-      const res=await fetch('/config.json',{cache:'no-store'});
-      if(!res.ok)throw Error('File config.json mancante; completare il deploy con scripts/deploy.sh.');
-      config=await res.json();
-      if(!config.apiUrl||!config.clientId||!config.cognitoUrl)throw Error('Configurazione AWS incompleta.');
-      await processCallback();
-      token=token||sessionStorage.getItem('bilancio-token');
-      if(!token || jwtExpired(token)){sessionStorage.removeItem('bilancio-token');return;}
-      $('authView').classList.add('hidden');$('appView').classList.remove('hidden');
-      await reload();
-    }catch(e){$('loginMessage').textContent=e.message;}
-  }
-  start();
+const CATS=['Casa','Alimentari','Trasporti','Bollette','Salute','Svago','Shopping','Altro'];
+const INCOME=['Stipendio','Extra','Rimborsi','Altre entrate'];
+const DEFAULT_BUDGETS={Casa:700,Alimentari:400,Trasporti:180,Bollette:220,Salute:100,Svago:160,Shopping:140,Altro:100};
+const $=id=>document.getElementById(id);
+const html=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const money=n=>new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR'}).format(Number(n)||0);
+const usd=n=>new Intl.NumberFormat('it-IT',{style:'currency',currency:'USD'}).format(Number(n)||0);
+const base64url=bytes=>btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const localDay=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
+const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+const dateName=s=>new Date(s+'T12:00:00').toLocaleDateString('it-IT',{day:'2-digit',month:'short',year:'numeric'});
+let config,token=null,state={transactions:[],budgets:{},recurring:[]},costs=null,month=new Date(),view='home',editId=null,editRecId=null,busy=false;
+month.setDate(1);
+function error(msg){$('errorBanner').textContent=msg;$('errorBanner').classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});}
+function clearError(){$('errorBanner').classList.add('hidden');}
+function jwtExpired(jwt){try{const c=JSON.parse(atob(jwt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));return c.exp*1000<=Date.now()+15000;}catch{return true;}}
+const callbackUrl=()=>location.origin+'/';
+async function login(){const verifier=base64url(crypto.getRandomValues(new Uint8Array(32)));const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)));const nonce=base64url(crypto.getRandomValues(new Uint8Array(24)));sessionStorage.setItem('moneta-pkce',verifier);sessionStorage.setItem('moneta-state',nonce);const q=new URLSearchParams({response_type:'code',client_id:config.clientId,redirect_uri:callbackUrl(),scope:'openid email',state:nonce,code_challenge:base64url(digest),code_challenge_method:'S256'});location.assign(config.cognitoUrl+'/oauth2/authorize?'+q);}
+async function handleCallback(){const q=new URLSearchParams(location.search);if(q.has('error'))throw Error('Cognito: '+(q.get('error_description')||q.get('error')));if(!q.has('code'))return;const verifier=sessionStorage.getItem('moneta-pkce');const saved=sessionStorage.getItem('moneta-state');sessionStorage.removeItem('moneta-pkce');sessionStorage.removeItem('moneta-state');const code=q.get('code');const valid=Boolean(verifier&&saved&&saved===q.get('state'));history.replaceState({},'',location.pathname);if(!valid)throw Error('Stato di autenticazione non valido.');const body=new URLSearchParams({grant_type:'authorization_code',client_id:config.clientId,code,code_verifier:verifier,redirect_uri:callbackUrl()});const r=await fetch(config.cognitoUrl+'/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const data=await r.json();if(!r.ok||!data.access_token)throw Error('Login fallito: '+(data.error||r.status));token=data.access_token;sessionStorage.setItem('moneta-token',token);}
+function logout(){sessionStorage.removeItem('moneta-token');token=null;location.assign(config.cognitoUrl+'/logout?'+new URLSearchParams({client_id:config.clientId,logout_uri:callbackUrl()}));}
+async function api(path,method='GET',obj){if(!token||jwtExpired(token)){sessionStorage.removeItem('moneta-token');throw Error('Sessione scaduta. Effettua nuovamente il login.');}const r=await fetch(config.apiUrl+path,{method,headers:{Authorization:'Bearer '+token,...(obj===undefined?{}:{'Content-Type':'application/json'})},body:obj===undefined?undefined:JSON.stringify(obj),cache:'no-store'});if(r.status===204)return null;const data=await r.json().catch(()=>({}));if(!r.ok)throw Error(data.error||'Errore API '+r.status);return data;}
+async function reload(){clearError();try{const data=await api('/state');state={transactions:Array.isArray(data.transactions)?data.transactions:[],budgets:{...DEFAULT_BUDGETS,...data.budgets},recurring:Array.isArray(data.recurring)?data.recurring:[]};render();}catch(e){error(e.message);}}
+function navigate(target){view=target;document.querySelectorAll('.view').forEach(el=>el.classList.toggle('hidden',el.id!=='view-'+target));document.querySelectorAll('.nav-btn').forEach(el=>el.classList.toggle('active',el.dataset.view===target));$('topSection').textContent={home:'Panoramica',movements:'Movimenti',recurring:'Ricorrenze',costs:'Costi AWS',settings:'Budget e dati'}[target];window.scrollTo({top:0});if(target==='costs'&&costs)renderCosts();}
+const sum=(list,type)=>list.filter(t=>t.type===type).reduce((a,x)=>a+Math.round(Number(x.amount)*100),0)/100;
+function balance(list){return Math.round(list.reduce((acc,t)=>acc+(t.type==='income'?1:-1)*Math.round(Number(t.amount)*100),0))/100;}
+const txSort=(a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id);
+function table(items,actions=false){if(!items.length)return '<div class="empty">Nessun movimento presente.</div>';return `<table class="data-table"><thead><tr><th>DESCRIZIONE</th><th>CATEGORIA</th><th>DATA</th><th class="right">IMPORTO</th>${actions?'<th class="right">AZIONI</th>':''}</tr></thead><tbody>${items.map(t=>`<tr><td><strong>${html(t.description)}</strong>${t.recurringId?'<div class="muted">↻ Ricorrente</div>':''}</td><td><span class="pill">${html(t.category)}</span></td><td class="date-text">${html(dateName(t.date))}</td><td class="right ${t.type==='income'?'positive':'negative'}"><strong>${t.type==='income'?'+':'−'}${money(t.amount)}</strong></td>${actions?`<td class="right"><button class="table-action" data-edit="${html(t.id)}">Modifica</button><button class="table-action danger" data-delete="${html(t.id)}">Elimina</button></td>`:''}</tr>`).join('')}</tbody></table>`;}
+function chartSvg(series,labels,{colors=['#55e8bb'],currency='EUR',includeZero=false}={}){
+ const W=670,H=245,L=58,R=20,T=20,B=42;
+ const values=series.flatMap(s=>s);let max=Math.max(...values,0),min=Math.min(...values,0);
+ if(includeZero){min=Math.min(0,min);max=Math.max(0,max);}if(max===min){max+=1;min-=1;}
+ const padding=(max-min)*.12;max+=padding;min-=padding;
+ const x=i=>L+(W-L-R)*(labels.length===1?.5:i/(labels.length-1));
+ const y=n=>T+(H-T-B)*(max-n)/(max-min);
+ const fmt=v=>currency==='USD'?usd(v):money(v);
+ const grid=Array.from({length:4},(_,i)=>{const v=min+(max-min)*i/3,py=y(v);return `<line class="chart-gridline" x1="${L}" y1="${py.toFixed(1)}" x2="${W-R}" y2="${py.toFixed(1)}"/><text x="${L-8}" y="${(py+4).toFixed(1)}" text-anchor="end">${html(new Intl.NumberFormat('it-IT',{maximumFractionDigits:0,notation:Math.abs(v)>10000?'compact':'standard'}).format(v))}</text>`;}).join('');
+ const paths=series.map((s,j)=>{const pts=s.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');const circles=s.map((v,i)=>`<circle cx="${x(i)}" cy="${y(v)}" r="3.4" fill="${colors[j%colors.length]}"><title>${html(labels[i])}: ${html(fmt(v))}</title></circle>`).join('');return `<polyline points="${pts}" fill="none" stroke="${colors[j%colors.length]}" stroke-width="3.0" stroke-linejoin="round" stroke-linecap="round"/>${circles}`;}).join('');
+ return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Grafico a linee"><g>${grid}<line class="chart-zero" x1="${L}" y1="${y(0)}" x2="${W-R}" y2="${y(0)}"/></g>${paths}${labels.map((name,i)=>`<text x="${x(i)}" y="${H-13}" text-anchor="middle">${html(name)}</text>`).join('')}</svg>`;
+}
+function render(){const today=localDay(),valid=state.transactions.filter(t=>t.date<=today),monthNow=today.slice(0,7),m=valid.filter(t=>t.date.startsWith(monthNow));$('totalBalance').textContent=money(balance(valid));$('totalMovements').textContent=`${valid.length} movimenti`;$('incomeTotal').textContent=money(sum(m,'income'));$('expenseTotal').textContent=money(sum(m,'expense'));$('balanceTotal').textContent=money(balance(m));$('incomeMonth').textContent=$('expenseMonth').textContent=new Date().toLocaleDateString('it-IT',{month:'long',year:'numeric'});$('recentRows').innerHTML=table([...state.transactions].sort(txSort).slice(0,7));
+ const months=Array.from({length:6},(_,i)=>new Date(new Date().getFullYear(),new Date().getMonth()-5+i,1));const labels=months.map(d=>d.toLocaleDateString('it-IT',{month:'short'}));const inc=[],out=[],balances=[];
+ months.forEach((d,i)=>{const key=monthKey(d),dateEnd=i===5?today:new Date(d.getFullYear(),d.getMonth()+1,0).toLocaleDateString('en-CA');const rows=valid.filter(t=>t.date.startsWith(key));inc.push(sum(rows,'income'));out.push(sum(rows,'expense'));const last=i===5?today:`${key}-${String(new Date(d.getFullYear(),d.getMonth()+1,0).getDate()).padStart(2,'0')}`;balances.push(balance(valid.filter(t=>t.date<=last)));});
+ $('balanceChart').innerHTML=chartSvg([balances],labels,{colors:['#72e6d6']});$('flowChart').innerHTML=chartSvg([inc,out],labels,{colors:['#55e8bb','#ff8d9e'],includeZero:true});
+ $('monthLabel').textContent=month.toLocaleDateString('it-IT',{month:'long',year:'numeric'});$('transactionRows').innerHTML=table(state.transactions.filter(t=>t.date.slice(0,7)===monthKey(month)).sort(txSort),true);
+ $('recurringCount').textContent=state.recurring.length+' regole';$('recurringRows').innerHTML=recurringTable();renderBudgets();}
+function recurringTable(){const rows=[...state.recurring].sort((a,b)=>a.startDate.localeCompare(b.startDate));if(!rows.length)return '<div class="empty">Non hai ancora creato ricorrenze. Puoi iniziare con affitto, stipendi o abbonamenti.</div>';const freq={weekly:'settimanale',monthly:'mensile',quarterly:'trimestrale',yearly:'annuale'};return `<table class="data-table"><thead><tr><th>REGOLA</th><th>CADENZA</th><th>PROSSIMA/INIZIO</th><th class="right">IMPORTO</th><th class="right">AZIONI</th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${html(r.description)}</strong><div class="muted">${r.active?'● Attiva':'○ In pausa'}</div></td><td><span class="pill">${r.interval>1?'ogni '+r.interval+' × ':''}${html(freq[r.frequency])}</span></td><td>${html(dateName(r.startDate))}</td><td class="right ${r.type==='income'?'positive':'negative'}">${r.type==='income'?'+':'−'}${money(r.amount)}</td><td class="right"><button class="table-action" data-rec-edit="${html(r.id)}">Modifica</button><button class="table-action danger" data-rec-delete="${html(r.id)}">Elimina</button></td></tr>`).join('')}</tbody></table>`;}
+function renderBudgets(){const monthTx=state.transactions.filter(t=>t.date.slice(0,7)===monthKey(month));$('budgetRows').innerHTML=CATS.map(cat=>{const cap=Number(state.budgets[cat]||0),spent=sum(monthTx.filter(x=>x.category===cat),'expense'),p=cap?spent/cap*100:0;return `<div class="budget"><div class="budget-head"><strong>${html(cat)}</strong><input class="input budget-input" type="number" step="0.01" min="0" max="1000000" data-budget="${html(cat)}" aria-label="Budget ${html(cat)}" value="${cap}"></div><div class="track"><div class="fill ${p>100?'over':''}" style="width:${Math.min(100,Math.max(0,p))}%"></div></div><div class="muted">${money(spent)} di ${money(cap)}</div></div>`;}).join('');}
+async function loadCosts(){clearError();$('costStatus').textContent='Caricamento costi AWS…';$('loadCostsButton').disabled=true;try{costs=await api('/costs');renderCosts();}catch(e){error(e.message);$('costStatus').textContent='Impossibile caricare i costi.';}finally{$('loadCostsButton').disabled=false;}}
+function renderCosts(){if(!costs)return;$('awsBudget').textContent=usd(costs.budgetUSD||3);if(!costs.available){$('costStatus').textContent=costs.message||'Cost Explorer non disponibile.';return;}$('awsSpent').textContent=usd(costs.total);$('awsRemaining').textContent=usd((costs.budgetUSD||3)-costs.total);$('awsRemaining').classList.toggle('negative',costs.total>(costs.budgetUSD||3));$('awsCostUpdated').textContent='Aggiornato '+new Date(costs.updatedAt).toLocaleString('it-IT');const days=costs.daily||[];$('costChart').innerHTML=days.length?chartSvg([days.map(d=>d.amount)],days.map((d,i)=>i%Math.max(1,Math.ceil(days.length/8))===0?d.date.slice(-2):''),{colors:['#9fbbff'],currency:'USD',includeZero:true}):'<p class="empty">Ancora nessun costo registrato.</p>';$('costServices').innerHTML=(costs.services||[]).length?costs.services.map(s=>`<div class="service"><span>${html(s.name)}</span><strong>${usd(s.amount)}</strong></div>`).join(''):'<p class="empty">Nessun costo per servizio.</p>';$('costStatus').textContent=costs.scope;}
+function categories(type,target){const selected=$(target).value;$(target).innerHTML=(type==='income'?INCOME:CATS).map(x=>`<option value="${html(x)}">${html(x)}</option>`).join('');if([...$(target).options].some(opt=>opt.value===selected))$(target).value=selected;}
+function editTransaction(id=null){editId=id;const t=state.transactions.find(t=>t.id===id);$('txForm').reset();$('dialogTitle').textContent=t?'Modifica movimento':'Nuovo movimento';$('txType').value=t?.type||'expense';categories($('txType').value,'txCategory');$('txDescription').value=t?.description||'';$('txAmount').value=t?.amount??'';$('txDate').value=t?.date||localDay();$('txCategory').value=t?.category||($('txType').value==='income'?INCOME[0]:CATS[0]);$('txNote').value=t?.note||'';$('txDialog').showModal();}
+function editRecurring(id=null){editRecId=id;const r=state.recurring.find(r=>r.id===id);$('recForm').reset();$('recDialogTitle').textContent=r?'Modifica ricorrenza':'Nuova ricorrenza';$('recType').value=r?.type||'expense';categories($('recType').value,'recCategory');$('recDescription').value=r?.description||'';$('recAmount').value=r?.amount??'';$('recStart').value=r?.startDate||localDay();$('recCategory').value=r?.category||CATS[0];$('recFrequency').value=r?.frequency||'monthly';$('recInterval').value=r?.interval??1;$('recEnd').value=r?.endDate||'';$('recNote').value=r?.note||'';$('recActive').checked=r?.active??true;$('recDialog').showModal();}
+async function mutate(work){if(busy)return;busy=true;clearError();try{await work();await reload();}catch(e){error(e.message);}finally{busy=false;}}
+function download(name,text,type){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);}
+function exportCsv(){const safe=s=>{const val=String(s??'');return '"'+(/^[\s]*[=+@-]/.test(val)?"'"+val:val).replace(/"/g,'""')+'"';};const rows=[['Data','Tipo','Descrizione','Categoria','Importo EUR','Note'],...state.transactions.map(t=>[t.date,t.type,t.description,t.category,t.amount,t.note])];download('moneta-movimenti.csv',rows.map(r=>r.map(safe).join(';')).join('\r\n'),'text/csv;charset=utf-8');}
+function bind(){document.querySelectorAll('[data-view]').forEach(el=>el.onclick=()=>navigate(el.dataset.view));document.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>navigate(el.dataset.go));$('loginButton').onclick=()=>login().catch(e=>$('loginMessage').textContent=e.message);$('logoutButton').onclick=logout;$('refreshButton').onclick=reload;$('addButton').onclick=$('addMovementButton').onclick=()=>editTransaction();$('addRecurringButton').onclick=()=>editRecurring();$('loadCostsButton').onclick=loadCosts;$('prevMonth').onclick=()=>{month=new Date(month.getFullYear(),month.getMonth()-1,1);render();};$('nextMonth').onclick=()=>{month=new Date(month.getFullYear(),month.getMonth()+1,1);render();};$('txType').onchange=()=>categories($('txType').value,'txCategory');$('recType').onchange=()=>categories($('recType').value,'recCategory');$('cancelTx').onclick=$('cancelTxBottom').onclick=()=>$('txDialog').close();$('cancelRec').onclick=$('cancelRecBottom').onclick=()=>$('recDialog').close();
+ $('txForm').onsubmit=e=>{e.preventDefault();const t={id:editId||'tx-'+crypto.randomUUID(),type:$('txType').value,description:$('txDescription').value.trim(),amount:Number($('txAmount').value),date:$('txDate').value,category:$('txCategory').value,note:$('txNote').value.trim()};if(!Number.isFinite(t.amount)||t.amount<=0)return;mutate(async()=>{await api(editId?'/transactions/'+encodeURIComponent(editId):'/transactions',editId?'PUT':'POST',t);$('txDialog').close();});};
+ $('recForm').onsubmit=e=>{e.preventDefault();const r={id:editRecId||'r-'+crypto.randomUUID(),type:$('recType').value,description:$('recDescription').value.trim(),amount:Number($('recAmount').value),startDate:$('recStart').value,category:$('recCategory').value,frequency:$('recFrequency').value,interval:Number($('recInterval').value),endDate:$('recEnd').value||null,note:$('recNote').value.trim(),active:$('recActive').checked};if(!Number.isFinite(r.amount)||r.amount<=0)return;mutate(async()=>{await api(editRecId?'/recurring/'+encodeURIComponent(editRecId):'/recurring',editRecId?'PUT':'POST',r);$('recDialog').close();});};
+ $('transactionRows').addEventListener('click',e=>{const a=e.target.closest('[data-edit]'),b=e.target.closest('[data-delete]');if(a)editTransaction(a.dataset.edit);if(b&&confirm('Eliminare definitivamente questo movimento?'))mutate(()=>api('/transactions/'+encodeURIComponent(b.dataset.delete),'DELETE'));});
+ $('recurringRows').addEventListener('click',e=>{const a=e.target.closest('[data-rec-edit]'),b=e.target.closest('[data-rec-delete]');if(a)editRecurring(a.dataset.recEdit);if(b&&confirm('Eliminare la ricorrenza? I movimenti già creati resteranno.'))mutate(()=>api('/recurring/'+encodeURIComponent(b.dataset.recDelete),'DELETE'));});
+ $('budgetRows').addEventListener('change',e=>{const el=e.target.closest('[data-budget]');if(!el)return;const amount=Number(el.value);if(!Number.isFinite(amount)||amount<0||amount>1000000){error('Budget non valido');render();return;}mutate(()=>api('/budgets/'+encodeURIComponent(el.dataset.budget),'PUT',{amount}));});
+ $('exportJson').onclick=()=>download('moneta-backup.json',JSON.stringify({...state,exportedAt:new Date().toISOString(),version:3},null,2),'application/json');$('exportCsv').onclick=exportCsv;
+}
+async function start(){bind();try{const r=await fetch('/config.json',{cache:'no-store'});if(!r.ok)throw Error('config.json mancante: esegui deploy.sh.');config=await r.json();if(!config.apiUrl||!config.clientId||!config.cognitoUrl)throw Error('Configurazione AWS incompleta.');await handleCallback();token=token||sessionStorage.getItem('moneta-token');if(!token||jwtExpired(token)){sessionStorage.removeItem('moneta-token');return;}$('authView').classList.add('hidden');$('appView').classList.remove('hidden');await reload();}catch(e){$('loginMessage').textContent=e.message;}}
+start();
 })();

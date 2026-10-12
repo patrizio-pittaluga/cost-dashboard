@@ -46,9 +46,13 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(x['UserPool']['Properties']['AdminCreateUserConfig']['AllowAdminCreateUserOnly'],True)
         self.assertEqual(x['DataTable']['Properties']['BillingMode'],'PROVISIONED')
         routes=[p for v in x.values() if v['Type']=='AWS::ApiGatewayV2::Route' for p in [v['Properties']]]
-        self.assertEqual(len(routes),5)
+        self.assertEqual(len(routes),9)
         self.assertTrue(all(p['AuthorizationType']=='JWT' and '!Ref' in p['AuthorizerId'] for p in routes))
         self.assertEqual(x['UserPoolDomain']['Properties']['ManagedLoginVersion'],1)
+        self.assertIn('DailyRecurringSchedule',x)
+        self.assertEqual(x['DailyRecurringSchedule']['Type'],'AWS::Scheduler::Schedule')
+        actions=x['ApiLambdaRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
+        self.assertTrue(any('ce:GetCostAndUsage' in (stmt['Action'] if isinstance(stmt['Action'],list) else [stmt['Action']]) for stmt in actions))
 
     def test_generated_python_matches_source(self):
         x=read_template('backend.yml')['Resources']

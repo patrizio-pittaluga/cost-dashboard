@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Avvisi gratuiti AWS Budgets sul COSTO COMPLESSIVO mensile dell account, non uno spegnimento automatico.'
+Description: 'Moneta - avvisi AWS Budgets sul COSTO COMPLESSIVO mensile dell account, non uno spegnimento automatico.'
 
 Parameters:
   NotificationEmail:

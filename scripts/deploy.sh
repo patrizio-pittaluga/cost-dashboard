@@ -3,15 +3,31 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FRONTEND_STACK="${FRONTEND_STACK:-bilancio-frontend}"
-BACKEND_STACK="${BACKEND_STACK:-bilancio-backend}"
+# Solo nomi Moneta: installazione pulita. Nessuna migrazione dagli stack bilancio.
+FRONTEND_STACK="moneta-frontend"
+BACKEND_STACK="moneta-backend"
 COGNITO_PREFIX="${COGNITO_PREFIX:-}"
+
+# Evita due installazioni attive (e costi doppi) se i vecchi stack sono ancora presenti.
+for target in 'us-east-1:bilancio-frontend' 'eu-south-1:bilancio-backend'; do
+  region="${target%%:*}"; stack="${target#*:}"
+  if status=$(aws cloudformation describe-stacks --region "$region" --stack-name "$stack" \
+    --query 'Stacks[0].StackStatus' --output text 2>&1); then
+    echo "ERRORE: lo stack precedente $stack esiste ancora in $region ($status)." >&2
+    echo 'Per la pulizia: python3 scripts/cleanup_legacy.py' >&2
+    exit 2
+  elif [[ "$status" != *'does not exist'* ]]; then
+    echo "ERRORE: impossibile verificare $stack: $status" >&2
+    exit 2
+  fi
+done
 
 if [[ -z "$COGNITO_PREFIX" ]]; then
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-  COGNITO_PREFIX="bilancio-${ACCOUNT_ID}"
+  COGNITO_PREFIX="moneta-${ACCOUNT_ID}"
 fi
 
+printf 'Moneta: deploy stack %s e %s.\n' "$FRONTEND_STACK" "$BACKEND_STACK"
 printf '%s\n' '[1/5] Rigenerazione del template Python...'
 python3 scripts/sync_lambda.py
 
@@ -56,7 +72,7 @@ p.write_text(json.dumps({
 }, indent=2)+'\n',encoding='utf-8')
 PY
 
-printf '%s\n' '[5/5] Caricamento frontend e invalidazione cache CloudFront...'
+printf '%s\n' '[5/5] Caricamento Moneta e invalidazione cache CloudFront...'
 aws s3 sync frontend/ "s3://$BUCKET/" --region us-east-1 \
   --exclude 'config.json' \
   --cache-control 'public, max-age=300'
@@ -66,8 +82,8 @@ aws s3 cp frontend/config.json "s3://$BUCKET/config.json" \
   --cache-control 'no-store'
 aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths '/*' > /dev/null
 
-printf '\nDEPLOY COMPLETATO (o stack aggiornati).\nSito: https://%s/\n' "$DOMAIN"
+printf '\nDEPLOY COMPLETATO (o stack aggiornati).\nMoneta: https://%s/\n' "$DOMAIN"
 printf 'UserPool (Milano): %s\n' "$USER_POOL_ID"
 printf 'API (Milano): %s\n' "$API_URL"
 printf 'CloudFront: pay-as-you-go, senza WAF.\n'
-printf 'PROSSIMO PASSO: crea manualmente un singolo utente Cognito da Console, poi completa MFA.\n'
+printf 'PROSSIMO PASSO: crea un nuovo utente Cognito da Console e configura MFA TOTP (il vecchio utente non viene migrato).\n'

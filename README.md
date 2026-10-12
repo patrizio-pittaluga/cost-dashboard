@@ -1,126 +1,100 @@
-# Bilancio personale AWS — Milano + CloudFront pay-as-you-go senza WAF
+# Moneta — installazione pulita AWS
 
-Tre stack CloudFormation indipendenti. Repository pronto per Git.
+**Moneta** è una dashboard privata per entrate, uscite, saldo e ricorrenze. Questa release usa **solo nomi stack `moneta-*`**. Se l'app precedente era `bilancio`, non effettueremo alcuna migrazione: hai confermato che non ci sono dati da conservare.
 
-| Stack | Regione | Contenuto |
+## Architettura
+
+| Stack | Regione | Servizi |
 |---|---|---|
-| `bilancio-budget` | `us-east-1` | Budget mensile dell'intero account AWS, notifiche email |
-| `bilancio-frontend` | `us-east-1` | CloudFront pay-as-you-go senza WAF, S3 privato + OAC (senza WAF) |
-| `bilancio-backend` | `eu-south-1` **Milano** | Cognito Lite, HTTP API, Lambda **Python 3.13**, DynamoDB |
+| `moneta-frontend` | `us-east-1` | Bucket S3 privato, CloudFront pay-as-you-go, Origin Access Control |
+| `moneta-backend` | `eu-south-1` (Milano) | User Pool Cognito Lite con MFA TOTP obbligatorio, HTTP API protetta da JWT, Lambda Python 3.13, DynamoDB, EventBridge Scheduler, CloudWatch |
+| `moneta-budget` | `us-east-1` | AWS Budgets, budget mensile di 3 USD per tutto l'account e avvisi email |
 
-Il dominio personalizzato (`spese.ilsitodipatrizio.it` su GoDaddy) è volutamente rimandato. Il primo indirizzo HTTPS sarà `https://d...cloudfront.net/`.
+Non usiamo AWS WAF a pagamento, ALB, EC2, NAT Gateway, Route 53, PricingPlanManager, SMS MFA o concorrenza Lambda riservata. GoDaddy rimane indipendente: per ora usiamo il dominio HTTPS CloudFront di AWS. I file frontend non contengono dati finanziari; quelli sono visibili solo dopo il login Cognito. Le API verificano il token JWT e l'identità del client.
 
-## 0. Prerequisiti
+## Prerequisiti
 
-- AWS CLI v2, Bash, Python 3.9+ sul computer di deploy. `python3 -m unittest discover -s tests -v` usa anche `boto3` e `PyYAML` installati localmente. **Non** servono queste due librerie per lanciare il deploy.
-- La regione `eu-south-1` deve essere abilitata per l'account; il solo DNS è rimandato.
+- AWS CLI v2 autenticata tramite CloudShell oppure IAM Identity Center/SSO (nessuna access key permanente obbligatoria).
+- Accesso AWS con autorizzazioni per CloudFormation, IAM, Cognito, DynamoDB, Lambda, CloudFront, S3, EventBridge Scheduler, Cost Explorer e AWS Budgets.
+- Python 3.9+ per gli script, `bash` per il deploy. `boto3` è già disponibile nel runtime Lambda; per i test locali servono `boto3` e `PyYAML`.
+- Consapevolezza che **cancellare gli stack originali distrugge gli utenti Cognito/MFA e qualsiasi dato precedente**. Non tocca altri stack AWS, né dominio GoDaddy, né account AWS.
 
-## 1. Budget PRIMA di creare le altre risorse
+## 1. Crea prima il nuovo budget (manteniamo attivi gli avvisi durante la pulizia)
+
+Dalla radice del progetto:
 
 ```bash
 ./scripts/deploy_budget.sh tua-email@example.com
 ```
 
-Imposta **4 USD/mese sull'intero account**, avvisi al 50%, 75%, 100% e previsione 100%. Puoi modificare `MonthlyLimitUSD` nel comando. Non garantisce un tetto di spesa rigido: **i budget inviano avvisi, non disabilitano le risorse**. I costi AWS sono espressi in USD; un limite 4 USD non equivale esattamente a 5 EUR. Controllare fattura, IVA ed eventuali risorse preesistenti.
+Il comando crea **`moneta-budget`** a `us-east-1` con soglia predefinita **3 USD** (margine rispetto all'obiettivo 4 EUR mensili). Puoi modificare la soglia in `cloudformation/budget.yml` o nello script. Questa è una notifica, **non** un tetto/blocco automatico dei costi. Potrebbero esserci temporaneamente due budget fino alla rimozione del vecchio.
 
-## 2. Deploy frontend e backend
+## 2. Controlla l'inventario dei vecchi stack (non cancella nulla)
 
 ```bash
-# facoltativo: imposta un prefisso Cognito univoco nella regione eu-south-1
-# export COGNITO_PREFIX=bilancio-123456789012
+python3 scripts/cleanup_legacy.py
+```
+
+Mostra gli oggetti associati esattamente a questi stack:
+
+- `bilancio-backend` in `eu-south-1`;
+- `bilancio-frontend` in `us-east-1`;
+- `bilancio-budget` in `us-east-1`.
+
+**Importante:** la precedente infrastruttura impostava `DeletionPolicy: Retain` su Cognito User Pool, tabella DynamoDB e bucket S3. La sola eliminazione CloudFormation lascerebbe queste risorse nell'account, con possibili costi residui. Lo script le individua tramite CloudFormation e le elimina solo dopo aver eliminato i vecchi stack. Per il User Pool prima disattiva `DeletionProtection`. Se il bucket è versionato, lo script si ferma prima di svuotarlo; se un'operazione fallisce, controlla manualmente le risorse residue e non rilanciare comandi alla cieca.
+
+## 3. Elimina definitivamente l'app precedente
+
+**Solo dopo aver controllato l'inventario e verificato di essere nell'account AWS corretto:**
+
+```bash
+aws sts get-caller-identity --query Account --output text
+python3 scripts/cleanup_legacy.py --execute --confirm-account 123456789012
+```
+
+Sostituisci `123456789012` con **il tuo** Account ID mostrato dal comando precedente. Non mettere l'Account ID nel repository. Lo script richiede che `moneta-budget` sia già nello stato `CREATE_COMPLETE` o `UPDATE_COMPLETE`. Non elimina mai gli stack `moneta-*`.
+
+Se il vecchio stack aveva un altro nome, **non** modificare lo script per usare nomi generici: identifica prima il nome e l'origine delle risorse AWS dalla console. Se il vecchio User Pool o bucket è stato creato fuori da CloudFormation o i suoi stack sono già stati rimossi con `Retain`, questi oggetti **non** possono essere ritrovati automaticamente dallo script: controlla manualmente le risorse residue.
+
+## 4. Nuovo deploy con nomi Moneta
+
+```bash
+python3 scripts/sync_lambda.py
+aws cloudformation validate-template --template-body file://cloudformation/frontend.yml --region us-east-1
+aws cloudformation validate-template --template-body file://cloudformation/backend.yml --region eu-south-1
+aws cloudformation validate-template --template-body file://cloudformation/budget.yml --region us-east-1
 ./scripts/deploy.sh
 ```
 
-Lo script:
+Vengono creati `moneta-frontend` e `moneta-backend`. La Lambda è definita in `lambda/index.py`, sincronizzata nello YAML con `scripts/sync_lambda.py` e include operazioni CRUD e generazione automatica dei movimenti ricorrenti. Alla fine lo script crea `frontend/config.json` **solo localmente**, lo pubblica sul bucket S3 privato e invalida CloudFront. `config.json` contiene identificatori pubblici OAuth e URL, mai username o password; rimane escluso da Git.
 
-1. Copia `lambda/index.py` (sorgente modificabile) nella proprietà inline `Code.ZipFile` di `cloudformation/backend.yml` tramite `scripts/sync_lambda.py`.
-3. Legge l'output `CloudFrontDomain` e lo passa come parametro a `cloudformation/backend.yml`, distribuito **solo in Milano** con `--capabilities CAPABILITY_IAM`.
-4. Genera `frontend/config.json` con URL API e configurazione **pubblica** Cognito, carica HTML/JS in S3, invalida la cache CloudFront.
-5. Stampa URL del sito, nome User Pool e URL API.
+Lo script controlla che i vecchi stack `bilancio-frontend` e `bilancio-backend` non esistano ancora, così non crea due installazioni parallele. Per il login usa il prefisso Cognito `moneta-<account-id>`; se è già occupato puoi impostare `COGNITO_PREFIX=moneta-personale-univoco ./scripts/deploy.sh` per scegliere un prefisso alternativo.
 
-**Mai inserire password, segreti Cognito o chiavi AWS nei file frontend.** `config.json` contiene soltanto URL e client ID pubblico ed è escluso da Git.
+**Dovrai creare un nuovo utente Cognito** a Milano, e configurare una nuova password e MFA TOTP. Le identità del vecchio User Pool non vengono migrate.
 
-### Deploy manuale CloudFormation senza lo script
+## 5. Funzionalità e costi
 
-Se desideri eseguire i template uno per volta:
+- Home con **saldo attuale**, entrate/uscite, ultimi sette movimenti e grafici a linee degli ultimi sei mesi.
+- Movimenti manuali con inserimento, modifica, eliminazione ed esportazione.
+- Regole di ricorrenza settimanali, mensili, trimestrali e annuali, modificabili, sospendibili e con intervalli 1–12. EventBridge Scheduler richiama la Lambda ogni giorno alle **06:10 Europe/Rome**: le scritture con ID deterministico e controllo di esistenza evitano doppioni.
+- Costi AWS dell'intero account tramite Cost Explorer, con cache di 24 ore per ridurre le chiamate (Cost Explorer può addebitare circa $0.01 per richiesta; l'importo dipende dal listino vigente).
+- Budget AWS mensile 3 USD per l'intero account, con avvisi al 50%, 75%, 100% e sul superamento previsto.
+- DynamoDB provisioned 5 RCU/5 WCU, senza PITR; CloudWatch log 7 giorni, HTTP API throttling a 2 richieste/s e burst 5. Non sono garanzie di spesa massima.
 
-```bash
-aws cloudformation deploy --region us-east-1 --stack-name bilancio-frontend \
-  --template-file cloudformation/frontend.yml
+**Il tuo tetto desiderato è 4 EUR/mese.** AWS pay-as-you-go non offre una garanzia assoluta di non superarlo: i budget inviano avvisi ma non arrestano automaticamente la fatturazione. Controlla i costi e tieni attiva l'MFA dell'identità amministrativa AWS.
 
-aws cloudformation describe-stacks --region us-east-1 --stack-name bilancio-frontend \
-  --query 'Stacks[0].Outputs' --output table
-
-python3 scripts/sync_lambda.py
-
-aws cloudformation deploy --region eu-south-1 --stack-name bilancio-backend \
-  --template-file cloudformation/backend.yml --capabilities CAPABILITY_IAM \
-  --parameter-overrides CloudFrontDomain=d123456abcdef.cloudfront.net CognitoDomainPrefix=bilancio-IL-TUO-ACCOUNT
-```
-
-**Sostituisci** l'esempio `CloudFrontDomain` con l'output reale. Per utilizzare il sito occorre anche caricare `frontend/index.html`, `frontend/app.js` e `frontend/config.json` nel bucket; `./scripts/deploy.sh` automatizza questa parte. Lo script è quindi la strada più semplice.
-
-## 3. Creare l'unico utente Cognito e attivare MFA
-
-1. Console AWS → **Cognito** → regione **Europe (Milan) / eu-south-1** → User pools → pool in output dello stack `bilancio-backend`.
-2. Crea **manualmente un solo utente**, con il tuo indirizzo email. La registrazione pubblica è disabilitata (`AllowAdminCreateUserOnly: true`). Imposta una password temporanea e usa la procedura di primo accesso per sceglierne una definitiva.
-3. Apri l'URL CloudFront generato, premi **Accedi con Cognito**. Alla prima autenticazione completa il cambio password e **registra il TOTP** con un'app Authenticator; Cognito richiede MFA per poter finalizzare l'accesso.
-4. Verifica che una richiesta a `GET /state` senza `Authorization` restituisca **401** da API Gateway, e che con JWT ID token ma non access token venga rifiutata dalla Lambda (**403**).
-
-**Nota pratica:** gli utenti amministrativamente creati con password permanente potrebbero richiedere una procedura di enrollment TOTP diversa. Usa il normale flusso di password temporanea, che avvia la configurazione guidata nella Hosted UI classica. Non impostare `MfaConfiguration` su OPTIONAL per aggirare difficoltà di onboarding: si perde la garanzia MFA.
-
-## 4. Sicurezza e modello dati
-
-- *Prima del login*: `index.html`, `app.js` e `config.json` sono file statici accessibili, ma non contengono movimenti, budget, token, password o credenziali. L'interfaccia della dashboard resta nascosta.
-- *Dopo il login*: OAuth2 Authorization Code + **PKCE**. Cognito Lite classic Hosted UI con username/password e **TOTP obbligatorio**. Il token di accesso sta in `sessionStorage`, non viene caricato su S3 e scade dopo **30 minuti** (nessun refresh token persistente).
-- API Gateway HTTP API usa `JWT Authorizer` su **tutte le cinque route**. La Lambda valida ulteriormente `token_use == access` e `client_id` di Cognito. Senza JWT valido nessuna operazione legge DynamoDB.
-- La Lambda ignora qualsiasi identità utente nel body; la chiave `PK = USER#<sub>` è ottenuta solo dai claim validati. I movimenti e i budget degli utenti sono isolati per `sub`.
-- IAM Lambda concede soltanto `Query`, `PutItem`, `DeleteItem` **sulla tabella specifica**; niente `Scan` e niente accesso alla console. DynamoDB usa il default **AWS-owned key** per cifrare gratuitamente i dati a riposo.
-- Bucket S3 con public access block + Origin Access Control e bucket policy che autorizza solo la distribuzione CloudFront. Nessun hosting website pubblico S3.
-- Retention CloudWatch Lambda: 7 giorni. `DeletionPolicy: Retain` per DynamoDB, bucket e Cognito (non cancellare dati per errore). Dopo una cancellazione dello stack, **le risorse con Retain possono continuare a generare costi**.
-- Le persone con privilegi amministrativi sull'account AWS o in possesso di un access token valido potrebbero accedere ai dati. MFA non è una protezione contro un account AWS compromesso o un token già rubato. Proteggi l'account AWS con MFA e ruoli IAM limitati.
-
-### Endpoint
-
-| Metodo | Path | Funzione |
-|---|---|---|
-| GET | `/state` | Movimenti e budget propri |
-| POST | `/transactions` | Inserimento movimento |
-| PUT | `/transactions/{id}` | Modifica movimento |
-| DELETE | `/transactions/{id}` | Rimozione movimento |
-| PUT | `/budgets/{category}` | Impostazione budget di categoria |
-
-### Sviluppo del codice Python
-
-Modifica `lambda/index.py` e rilancia `./scripts/deploy.sh`. Questo genera il codice inline CloudFormation. La stessa Lambda usa **boto3 incluso nel runtime Lambda Python** e non richiede librerie esterne. Quando serviranno più file o dipendenze, passeremo a ZIP versione S3, SAM o CDK.
-
-## 5. Costi e limitazioni
-
-
-DynamoDB **PROVISIONED 5 RCU / 5 WCU** sfrutta il free tier di 25 unità di ciascun tipo a livello di regione/payer account, purché queste non siano già consumate da altre tabelle. Impostazione volutamente semplice per un utente. In caso di carico elevato può essere necessario aumentare la capacità (con costi). Non è presente backup automatico: usa il pulsante **Esporta JSON** della dashboard. L'export non è una funzione di ripristino.
-
-
-## 6. GoDaddy / dominio personalizzato (solo in futuro)
-
-Quando avrai recuperato accesso ai DNS, potremo:
-
-1. richiedere un certificato ACM in `us-east-1` per `spese.ilsitodipatrizio.it`;
-2. associare il certificato e la `Alias` CloudFront nel template frontend;
-3. aggiungere `CustomFrontendDomain=spese.ilsitodipatrizio.it` allo stack backend per OAuth callback e CORS;
-4. creare CNAME GoDaddy del sottodominio verso la distribuzione CloudFront e i record di validazione ACM.
-
-Non è necessario acquistare o trasferire il dominio su Route 53.
-
-## 7. Test offline
+## 6. Test locali
 
 ```bash
-python3 -m pip install --user pyyaml boto3
+python3 -m pip install boto3 pyyaml
 python3 -m unittest discover -s tests -v
 python3 -m py_compile lambda/index.py
+bash -n scripts/deploy.sh scripts/deploy_budget.sh
 node --check frontend/app.js
 ```
 
-I test coprono letture senza JWT, ID token scartati, client estranei, separazione per utente e operazioni CRUD. **Non sostituiscono** la validazione CloudFormation e il test end-to-end nel tuo account. Per una verifica AWS senza deploy puoi usare `aws cloudformation validate-template --region ... --template-body file://...` per ogni template. La validazione non dimostra che il tuo account sia idoneo al piano Free.
+La suite valida logica Lambda e consistenza delle risorse, ma **non** equivale a un deploy reale su AWS. L'autenticazione Cognito, il funzionamento HTTPS e la disponibilità delle quote si verificano nel tuo account dopo il deploy.
 
-## Variante PAYG e controllo costi
-Il frontend usa CloudFront a consumo senza Web ACL AWS WAF e senza PricingPlanManager. Il budget AWS è un avviso, NON un limite di fatturazione. Per il tuo tetto di 4 EUR complessivi, imposta prudentemente `MonthlyLimitUSD=3` (conversione e imposte possono variare). Evita di abilitare WAF, CloudFront real-time logs, NAT Gateway, ALB e SMS Cognito. Verifica ogni settimana AWS Cost Explorer e gli avvisi budget. Il free tier standard CloudFront può ridurre o azzerare i costi per traffico personale, ma non garantisce una spesa massima.
+## 7. Gestione successiva del dominio
+
+Quando potrai accedere a GoDaddy, aggiungeremo `moneta.ilsitodipatrizio.com` e un certificato ACM gratuito per CloudFront in `us-east-1`, con record CNAME di validazione e di instradamento. GoDaddy resta registrar e gestore DNS. Questa configurazione **non** è inclusa nel deploy attuale.

@@ -7,8 +7,8 @@ if [[ $# -ne 1 ]]; then
 fi
 aws cloudformation deploy \
   --region us-east-1 \
-  --stack-name bilancio-budget \
+  --stack-name moneta-budget \
   --template-file cloudformation/budget.yml \
-  --parameter-overrides "NotificationEmail=$1" MonthlyLimitUSD=4 \
+  --parameter-overrides "NotificationEmail=$1" MonthlyLimitUSD=3 \
   --no-fail-on-empty-changeset
 printf 'Budget creato. Gli avvisi NON arrestano i servizi automaticamente.\n'

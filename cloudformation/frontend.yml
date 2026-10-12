@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Bilancio personale - frontend CloudFront pay-as-you-go, S3 privato, senza WAF.
+  Moneta - frontend CloudFront pay-as-you-go, S3 privato, senza WAF.
   DEPLOY SOLO IN us-east-1. Non richiede dominio personalizzato.
 
 Resources:
@@ -36,7 +36,7 @@ Resources:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
-        Comment: !Sub 'Bilancio personale - ${AWS::StackName} - frontend privato S3'
+        Comment: !Sub 'Moneta - ${AWS::StackName} - frontend S3 privato'
         Enabled: true
         IPV6Enabled: true
         HttpVersion: http2
