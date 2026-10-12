@@ -7,7 +7,7 @@ Parameters:
   CustomDomainName:
     Type: String
     Default: ''
-    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.com$'
+    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.it$'
     Description: 'Alias HTTPS CloudFront (lascia vuoto per il solo dominio AWS)'
   CustomCertificateArn:
     Type: String

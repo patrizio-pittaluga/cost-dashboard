@@ -11,7 +11,7 @@ Parameters:
   CustomDomainName:
     Type: String
     Default: ''
-    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.com$'
+    AllowedPattern: '^$|^moneta\.ilsitodipatrizio\.it$'
     Description: 'Dominio personalizzato per redirect OAuth e CORS'
   CognitoDomainPrefix:
     Type: String
