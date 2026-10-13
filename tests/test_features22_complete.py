@@ -146,4 +146,4 @@ class UiFullTests(unittest.TestCase):
         tags=re.findall(r'id="([^\"]+)"',html)
         self.assertEqual(len(tags),len(set(tags)))
         self.assertFalse(set(re.findall(r"\$\('([^']+)'\)",js)) - set(tags))
-        self.assertIn('moneta-static-v2.2.1',(root/'frontend/sw.js').read_text())
+        self.assertIn('moneta-static-v2.2.3',(root/'frontend/sw.js').read_text())

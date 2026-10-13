@@ -130,3 +130,11 @@ Sono stati eseguiti **112 test automatici** localmente, inclusi i test legacy. I
 10. **AWS**: controlla `UPDATE_COMPLETE`, Lambda CloudWatch, budget, PWA / cache e comportamento su almeno due smartphone/browser.
 
 In caso di errore interrompi l'utilizzo condiviso, preserva il backup e raccogli il messaggio CloudFormation/CloudWatch. Il rollback del codice non annulla i movimenti e gli storni già registrati: verifica sempre la compatibilità contabile prima di tornare a una versione precedente.
+
+
+## Aggiornamento 2.2.2 — Accesso e primo avvio
+
+- Pagina iniziale Moneta rinnovata, senza riferimenti tecnici al provider di autenticazione.
+- Tour introduttivo di sei passaggi al primo accesso per account **su questo browser/dispositivo**; si può saltare e ripetere da **Budget e dati → Rivedi il tour di Moneta**. La preferenza viene conservata in localStorage per identificativo account, non nel database: su un nuovo dispositivo il tour viene riproposto.
+- Il form username/password e il codice MFA restano sulle pagine ospitate da **Amazon Cognito**. Questo pacchetto migliora la schermata Moneta prima del reindirizzamento, **non** lo stile dei campi Cognito. Per personalizzare i campi reali occorre configurare il branding della Managed Login di Cognito separatamente nella console AWS (verificando il tipo di login supportato dal pool). Non sostituire il flusso OAuth PKCE con un form di credenziali gestito da Moneta.
+- Non sono necessarie modifiche allo schema DynamoDB o alle Lambda per questa release. La cache PWA passa a `moneta-static-v2.2.2`.

@@ -54,3 +54,38 @@
 .simulation-scroll{overflow-x:auto;margin-top:14px}.simulation-table{width:100%;border-collapse:collapse;min-width:460px;font-size:12px}.simulation-table th,.simulation-table td{padding:11px 8px;border-bottom:1px solid var(--stroke);text-align:right}.simulation-table th:first-child,.simulation-table td:first-child{text-align:left}.scenario-warning{color:#ff8d9e}.scenario-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 #reverseDialog{max-width:min(530px,calc(100vw - 24px))}#reverseDialog .tip{margin:14px 0}
 @media(max-width:600px){.portfolio-kpi{min-width:calc(50% - 6px);padding:12px}.portfolio-kpi strong{font-size:17px}.portfolio-actions button{min-height:42px}.portfolio-meta{gap:6px}.portfolio-entry .fund-row{flex-wrap:wrap}.fund-ledger-action{min-height:40px}#capitalInvestmentFields{grid-template-columns:1fr}.simulation-table{font-size:11px}}
+
+/* Moneta 2.2.2 · Accesso e guida introduttiva */
+.login-card{position:relative;overflow:hidden;padding:clamp(27px,5vw,44px);border-color:#34536a;background:linear-gradient(155deg,#172b3d,#101a2b 68%);box-shadow:0 28px 95px #0007}
+.login-card::before{content:'';position:absolute;right:-75px;top:-105px;width:240px;height:240px;border-radius:50%;background:radial-gradient(circle,#54d5ae2b,transparent 72%);pointer-events:none}
+.login-brand{display:flex;align-items:center;justify-content:space-between;margin-bottom:38px}
+.login-brand .symbol.large{margin:0;box-shadow:0 8px 35px #51dab52b}
+.login-brand-label{font-size:10px;letter-spacing:2px;color:#9cb4cb;font-weight:800}
+.login-card h1{font-size:clamp(44px,8vw,58px);line-height:1.1;margin:14px 0 0}
+.login-card p{font-size:15px;line-height:1.7;margin:17px 0 30px;max-width:35ch}
+.login-cta{min-height:55px;font-size:15px;box-shadow:0 10px 35px #37d1a52a}
+.login-cta span{font-size:22px}
+.login-foot{margin-top:23px;color:#a8bcd0;font-size:12px}
+.tutorial-dialog{width:min(520px,calc(100vw - 24px));padding:clamp(20px,4vw,32px);border:1px solid #375b70;background:linear-gradient(155deg,#1b3045,#111c30);box-shadow:0 30px 110px #0009}
+.tutorial-top,.tutorial-brand,.tutorial-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.tutorial-brand{justify-content:flex-start;font-size:10px;letter-spacing:1.4px;color:#b9cfe1;font-weight:800}
+.tutorial-brand .symbol{width:31px;height:31px;font-size:17px;border-radius:10px}
+.tutorial-skip{border:0;background:none;color:#b5c6d9;padding:9px 0;white-space:nowrap}
+.tutorial-skip:hover{color:#fff}
+.tutorial-progress{display:flex;gap:6px;margin:26px 0 18px}
+.tutorial-progress span{height:5px;flex:1;border-radius:5px;background:#31445a}
+.tutorial-progress span.current{background:#6be3bb}
+.tutorial-visual{display:grid;place-items:center;width:94px;height:94px;border-radius:25px;background:linear-gradient(140deg,#275c63,#233958);border:1px solid #477c7c;color:#8ef5d4;font-size:47px;margin:12px 0 24px}
+.tutorial-dialog h2{font-size:clamp(25px,5vw,32px);letter-spacing:-.8px;margin:12px 0}
+.tutorial-dialog p{font-size:15px;color:#bdcce0;line-height:1.75;min-height:80px}
+.tutorial-actions{margin-top:30px}
+.tutorial-actions .btn{min-height:45px}
+.tutorial-hint{text-align:center;color:#93a7c0;font-size:11px;line-height:1.5;margin-top:22px}
+@media(max-width:480px){.auth-shell{padding:15px}.login-card{border-radius:20px}.tutorial-dialog{max-height:calc(100dvh - 22px)}.tutorial-dialog p{min-height:0}.tutorial-top{align-items:flex-start}.tutorial-brand{font-size:9px}}
+
+/* Tour guidato: il riquadro illumina elementi reali, senza consentire modifiche. */
+.tour-shield{position:fixed;inset:0;z-index:9995;background:transparent;cursor:default}
+.tour-spotlight{position:fixed;z-index:9996;pointer-events:none;border:2px solid #6be3bb;border-radius:15px;box-shadow:0 0 0 9999px rgba(5,10,20,.72),0 0 0 5px #6be3bb3d;transition:top .22s ease,left .22s ease,width .22s ease,height .22s ease}
+.tutorial-dialog[open]{display:block;position:fixed;z-index:9998;left:auto;right:clamp(12px,4vw,45px);top:50%;bottom:auto;margin:0;transform:translateY(-50%);max-height:min(680px,calc(100dvh - 30px));overflow-y:auto}
+@media(max-width:700px){.tutorial-dialog[open]{left:12px;right:12px;top:auto;bottom:calc(env(safe-area-inset-bottom) + 12px);transform:none;width:auto;padding:18px;max-height:65dvh}.tutorial-dialog[open].tour-at-top{top:calc(env(safe-area-inset-top) + 10px);bottom:auto}.tutorial-dialog .tutorial-visual{width:48px;height:48px;font-size:26px;margin:8px 0}.tutorial-dialog .tutorial-progress{margin:12px 0}.tutorial-dialog h2{font-size:22px;margin:8px 0}.tutorial-dialog p{font-size:13px;line-height:1.5}.tutorial-dialog .tutorial-actions{margin-top:14px}.tutorial-dialog .tutorial-hint{margin-top:12px}}
+@media(prefers-reduced-motion:reduce){.tour-spotlight{transition:none}}

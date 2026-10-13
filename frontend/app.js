@@ -511,6 +511,80 @@ function bind(){
  $('membersList').addEventListener('click',e=>{const b=e.target.closest('[data-remove]');if(!b||!confirm('Rimuovere questo membro dal bilancio?'))return;mutate(async()=>{await api('/spaces/'+encodeURIComponent(activeSpace)+'/members/'+encodeURIComponent(b.dataset.remove),'DELETE');await refreshMe();});});
  $('exportJson').onclick=()=>download('moneta-backup.json',JSON.stringify({...state,exportedAt:new Date().toISOString(),version:3},null,2),'application/json');$('exportCsv').onclick=exportCsv;
 }
-async function start(){bind();initPwa();try{const r=await fetch('/config.json',{cache:'no-store'});if(!r.ok)throw Error('config.json mancante: esegui deploy.sh.');config=await r.json();if(!config.apiUrl||!config.clientId||!config.cognitoUrl)throw Error('Configurazione AWS incompleta.');await handleCallback();token=token||sessionStorage.getItem('moneta-token');if(!token||jwtExpired(token)){sessionStorage.removeItem('moneta-token');return;}$('authView').classList.add('hidden');$('appView').classList.remove('hidden');await refreshMe();await reload();}catch(e){$('loginMessage').textContent=e.message;}}
+
+// Guida introduttiva: preferenza per singolo account e dispositivo, nessun dato finanziario salvato.
+const TOUR_STEPS=[
+ {icon:'✦',title:'Benvenuto in Moneta',description:'Ti mostriamo le funzioni principali direttamente nell’app. La guida è dimostrativa: non crea movimenti e puoi saltarla.',target:'home',selector:'.hero'},
+ {icon:'◫',title:'La tua panoramica',description:'Questo è il saldo calcolato sui movimenti. Per iniziare, puoi registrare anche il tuo saldo iniziale.',target:'home',selector:'.hero'},
+ {icon:'↔',title:'Registra ogni movimento',description:'Da questo comando aggiungi entrate e spese. Il tutorial non aprirà il modulo e non salverà dati.',target:'movements',selector:'#addMovementButton'},
+ {icon:'▦',title:'Non perdere le scadenze',description:'Nel calendario puoi programmare pagamenti futuri. Il saldo cambia solo quando registri il pagamento.',target:'calendar',selector:'#calendarGrid'},
+ {icon:'♧',title:'Condividi un fondo',description:'Qui puoi creare un bilancio condiviso e invitare altri membri. I fondi sono opzionali.',target:'spaces',selector:'#view-spaces .page-title-row'},
+ {icon:'◈',title:'Scopri Moneta Insights',description:'Qui trovi analisi di liquidità, patrimonio, investimenti e simulazioni basate sui tuoi dati.',target:'insights',selector:'#view-insights .metric-grid'}
+];
+let tourStep=0,tourFrame=0;
+function tourStorageKey(){
+ try{const claims=JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));return 'moneta-tour-v1:'+String(claims.sub||'anonymous');}catch{return null;}
+}
+function tourSeen(){try{const k=tourStorageKey();return !k||localStorage.getItem(k)==='done';}catch{return true;}}
+function markTourSeen(){try{const k=tourStorageKey();if(k)localStorage.setItem(k,'done');}catch{}}
+function layoutTourSpotlight(){
+ const spot=$('tourSpotlight'),dialog=$('tutorialDialog');
+ if(!dialog.open)return;
+ const item=TOUR_STEPS[tourStep];
+ let el=document.querySelector(item.selector);
+ if(!el||el.closest('.hidden'))el=document.querySelector('[data-view="'+item.target+'"]');
+ if(!el){spot.classList.add('hidden');return;}
+ const r=el.getBoundingClientRect();
+ if(r.width<1||r.height<1){spot.classList.add('hidden');return;}
+ const pad=8,left=Math.max(6,r.left-pad),top=Math.max(6,r.top-pad);
+ spot.style.left=left+'px';spot.style.top=top+'px';
+ spot.style.width=Math.min(innerWidth-left-6,r.width+pad*2)+'px';
+ spot.style.height=Math.min(innerHeight-top-6,r.height+pad*2)+'px';
+ spot.classList.remove('hidden');
+ const mobile=innerWidth<700;
+ // Su smartphone la scheda resta lontana dal punto illuminato quando possibile.
+ dialog.classList.toggle('tour-at-top',mobile&&r.top>innerHeight*.52);
+}
+function scheduleTourLayout(){cancelAnimationFrame(tourFrame);tourFrame=requestAnimationFrame(layoutTourSpotlight);}
+function showTourStep(){
+ const item=TOUR_STEPS[tourStep];
+ navigate(item.target);
+ $('tutorialVisual').textContent=item.icon;
+ $('tutorialCounter').textContent='PASSAGGIO '+(tourStep+1)+' DI '+TOUR_STEPS.length;
+ $('tutorialTitle').textContent=item.title;$('tutorialDescription').textContent=item.description;
+ $('tutorialBack').disabled=tourStep===0;
+ $('tutorialNext').textContent=tourStep===TOUR_STEPS.length-1?'Inizia a usare Moneta ✓':'Continua →';
+ $('tutorialProgress').innerHTML=TOUR_STEPS.map((_,i)=>'<span class="'+(i<=tourStep?'current':'')+'"></span>').join('');
+ scheduleTourLayout();
+}
+function startTour(){
+ if($('tutorialDialog').open)return;
+ tourStep=0;
+ $('tourShield').classList.remove('hidden');
+ $('tutorialDialog').show();
+ document.body.classList.add('tour-running');
+ showTourStep();
+ $('tutorialNext').focus();
+}
+function finishTour(){
+ markTourSeen();
+ $('tutorialDialog').close();
+ $('tourShield').classList.add('hidden');$('tourSpotlight').classList.add('hidden');
+ document.body.classList.remove('tour-running');
+ cancelAnimationFrame(tourFrame);
+ navigate('home');
+}
+function bindTour(){
+ $('tutorialSkip').onclick=finishTour;
+ $('tutorialBack').onclick=()=>{tourStep=Math.max(0,tourStep-1);showTourStep();};
+ $('tutorialNext').onclick=()=>{if(tourStep===TOUR_STEPS.length-1)finishTour();else{tourStep++;showTourStep();}};
+ $('replayTutorial').onclick=startTour;
+ $('tutorialDialog').addEventListener('cancel',e=>{e.preventDefault();finishTour();});
+ document.addEventListener('keydown',e=>{if(!$('tutorialDialog').open)return;if(e.key==='Escape'){e.preventDefault();finishTour();}else if(e.key==='ArrowRight'){e.preventDefault();$('tutorialNext').click();}else if(e.key==='ArrowLeft'){e.preventDefault();$('tutorialBack').click();}});
+ window.addEventListener('resize',scheduleTourLayout);
+ window.addEventListener('scroll',scheduleTourLayout,{passive:true});
+}
+
+async function start(){bind();bindTour();initPwa();try{const r=await fetch('/config.json',{cache:'no-store'});if(!r.ok)throw Error('config.json mancante: esegui deploy.sh.');config=await r.json();if(!config.apiUrl||!config.clientId||!config.cognitoUrl)throw Error('Configurazione AWS incompleta.');await handleCallback();token=token||sessionStorage.getItem('moneta-token');if(!token||jwtExpired(token)){sessionStorage.removeItem('moneta-token');return;}$('authView').classList.add('hidden');$('appView').classList.remove('hidden');await refreshMe();await reload();if(!tourSeen())startTour();}catch(e){$('loginMessage').textContent=e.message;}}
 start();
 })();
