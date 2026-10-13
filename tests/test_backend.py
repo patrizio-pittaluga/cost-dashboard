@@ -11,6 +11,7 @@ os.environ.setdefault('AWS_SECRET_ACCESS_KEY', 'test')
 os.environ.setdefault('AWS_DEFAULT_REGION', 'eu-south-1')
 os.environ['TABLE_NAME'] = 'table-test'
 os.environ['COGNITO_CLIENT_ID'] = 'only-client'
+os.environ['USER_POOL_ID'] = 'eu-south-1_TEST'
 source = Path(__file__).resolve().parents[1] / 'lambda' / 'index.py'
 spec = importlib.util.spec_from_file_location('my_lambda', source)
 mod = importlib.util.module_from_spec(spec)

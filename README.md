@@ -1,162 +1,162 @@
-# Moneta — installazione pulita AWS
+# Moneta 2.0 — Bilanci privati e familiari
 
-**Moneta** è una dashboard privata per entrate, uscite, saldo e ricorrenze. Questa release usa **solo nomi stack `moneta-*`**. Se l'app precedente era `bilancio`, non effettueremo alcuna migrazione: hai confermato che non ci sono dati da conservare.
+Aggiornamento **in-place** degli stack esistenti `moneta-frontend` (us-east-1) e
+`moneta-backend` (eu-south-1), senza alterare la tabella DynamoDB o ricreare
+il Cognito User Pool. Dominio: **https://moneta.ilsitodipatrizio.it**.
 
-## Architettura
+## Cosa cambia
 
-| Stack | Regione | Servizi |
-|---|---|---|
-| `moneta-frontend` | `us-east-1` | Bucket S3 privato, CloudFront pay-as-you-go, Origin Access Control |
-| `moneta-backend` | `eu-south-1` (Milano) | User Pool Cognito Lite con MFA TOTP obbligatorio, HTTP API protetta da JWT, Lambda Python 3.13, DynamoDB, EventBridge Scheduler, CloudWatch |
-| `moneta-budget` | `us-east-1` | AWS Budgets, budget mensile di 3 USD per tutto l'account e avvisi email |
+- Ogni account Cognito conserva il proprio bilancio personale (`USER#sub`).
+- Nuovi spazi familiari (`SPACE#uuid`) con ruoli `owner`, `editor`, `viewer`.
+- Uno spazio può avere più membri e ogni utente può partecipare a più spazi.
+- Invitare utenti Cognito esistenti tramite email verificata; l'invito appare in app (non parte un'email automatica).
+- Le spese di uno spazio condiviso compaiono anche nello storico personale **dell'autore originale**. Un movimento condiviso e la sua proiezione personale vengono scritti insieme in una transazione DynamoDB.
+- **Fondo comune:** la spesa addebita il fondo, appare nel personale ma non diminuisce due volte il saldo personale.
+- **Pagamento personale:** la spesa compare nel familiare e diminuisce soltanto il saldo personale dell'autore.
+- **Versamento nel fondo:** entrata nel familiare + uscita nel personale di chi versa.
+- Ricorrenze personali e familiari; ricorrenze familiari generate una sola volta, con proiezione personale atomica quando l'autore è ancora membro.
+- Cognito group `Admins` per la dashboard costi AWS. L'applicazione **non concede a un admin l'accesso ai bilanci privati degli altri**.
 
-Non usiamo AWS WAF a pagamento, ALB, EC2, NAT Gateway, Route 53, PricingPlanManager, SMS MFA o concorrenza Lambda riservata. GoDaddy rimane indipendente: per ora usiamo il dominio HTTPS CloudFront di AWS. I file frontend non contengono dati finanziari; quelli sono visibili solo dopo il login Cognito. Le API verificano il token JWT e l'identità del client.
+## 1. Prima di modificare AWS
 
-## Prerequisiti
-
-- AWS CLI v2 autenticata tramite CloudShell oppure IAM Identity Center/SSO (nessuna access key permanente obbligatoria).
-- Accesso AWS con autorizzazioni per CloudFormation, IAM, Cognito, DynamoDB, Lambda, CloudFront, S3, EventBridge Scheduler, Cost Explorer e AWS Budgets.
-- Python 3.9+ per gli script, `bash` per il deploy. `boto3` è già disponibile nel runtime Lambda; per i test locali servono `boto3` e `PyYAML`.
-- Consapevolezza che **cancellare gli stack originali distrugge gli utenti Cognito/MFA e qualsiasi dato precedente**. Non tocca altri stack AWS, né dominio GoDaddy, né account AWS.
-
-## 1. Crea prima il nuovo budget (manteniamo attivi gli avvisi durante la pulizia)
-
-Dalla radice del progetto:
+1. Esporta un backup JSON da **Moneta > Budget e dati** mentre la versione attuale è online.
+2. Conserva una copia del repository attuale per un eventuale rollback.
+3. Aggiorna l'intero progetto con i file di questo pacchetto, **non soltanto `index.py`**: servono nuove rotte API e permessi IAM.
+4. In CloudShell usa le credenziali AWS normalmente impiegate per gli stack Moneta, poi controlla:
 
 ```bash
-./scripts/deploy_budget.sh tua-email@example.com
+aws sts get-caller-identity
+aws cloudformation describe-stacks --region eu-south-1 --stack-name moneta-backend --query 'Stacks[0].StackStatus' --output text
+aws cloudformation describe-stacks --region us-east-1 --stack-name moneta-frontend --query 'Stacks[0].StackStatus' --output text
 ```
 
-Il comando crea **`moneta-budget`** a `us-east-1` con soglia predefinita **3 USD** (margine rispetto all'obiettivo 4 EUR mensili). Puoi modificare la soglia in `cloudformation/budget.yml` o nello script. Questa è una notifica, **non** un tetto/blocco automatico dei costi. Potrebbero esserci temporaneamente due budget fino alla rimozione del vecchio.
+**Non eliminare gli stack e non eseguire `cleanup_legacy.py`** durante l'upgrade.
 
-## 2. Controlla l'inventario dei vecchi stack (non cancella nulla)
+## 2. Validazioni locali
 
-```bash
-python3 scripts/cleanup_legacy.py
-```
-
-Mostra gli oggetti associati esattamente a questi stack:
-
-- `bilancio-backend` in `eu-south-1`;
-- `bilancio-frontend` in `us-east-1`;
-- `bilancio-budget` in `us-east-1`.
-
-**Importante:** la precedente infrastruttura impostava `DeletionPolicy: Retain` su Cognito User Pool, tabella DynamoDB e bucket S3. La sola eliminazione CloudFormation lascerebbe queste risorse nell'account, con possibili costi residui. Lo script le individua tramite CloudFormation e le elimina solo dopo aver eliminato i vecchi stack. Per il User Pool prima disattiva `DeletionProtection`. Se il bucket è versionato, lo script si ferma prima di svuotarlo; se un'operazione fallisce, controlla manualmente le risorse residue e non rilanciare comandi alla cieca.
-
-## 3. Elimina definitivamente l'app precedente
-
-**Solo dopo aver controllato l'inventario e verificato di essere nell'account AWS corretto:**
+Dalla cartella principale di questo progetto:
 
 ```bash
-aws sts get-caller-identity --query Account --output text
-python3 scripts/cleanup_legacy.py --execute --confirm-account 123456789012
-```
-
-Sostituisci `123456789012` con **il tuo** Account ID mostrato dal comando precedente. Non mettere l'Account ID nel repository. Lo script richiede che `moneta-budget` sia già nello stato `CREATE_COMPLETE` o `UPDATE_COMPLETE`. Non elimina mai gli stack `moneta-*`.
-
-Se il vecchio stack aveva un altro nome, **non** modificare lo script per usare nomi generici: identifica prima il nome e l'origine delle risorse AWS dalla console. Se il vecchio User Pool o bucket è stato creato fuori da CloudFormation o i suoi stack sono già stati rimossi con `Retain`, questi oggetti **non** possono essere ritrovati automaticamente dallo script: controlla manualmente le risorse residue.
-
-## 4. Nuovo deploy con nomi Moneta
-
-```bash
+python3 -m pip install boto3 pyyaml # solo se non sono installati
 python3 scripts/sync_lambda.py
-aws cloudformation validate-template --template-body file://cloudformation/frontend.yml --region us-east-1
-aws cloudformation validate-template --template-body file://cloudformation/backend.yml --region eu-south-1
-aws cloudformation validate-template --template-body file://cloudformation/budget.yml --region us-east-1
-./scripts/deploy.sh
-```
-
-Vengono creati `moneta-frontend` e `moneta-backend`. La Lambda è definita in `lambda/index.py`, sincronizzata nello YAML con `scripts/sync_lambda.py` e include operazioni CRUD e generazione automatica dei movimenti ricorrenti. Alla fine lo script crea `frontend/config.json` **solo localmente**, lo pubblica sul bucket S3 privato e invalida CloudFront. `config.json` contiene identificatori pubblici OAuth e URL, mai username o password; rimane escluso da Git.
-
-Lo script controlla che i vecchi stack `bilancio-frontend` e `bilancio-backend` non esistano ancora, così non crea due installazioni parallele. Per il login usa il prefisso Cognito `moneta-<account-id>`; se è già occupato puoi impostare `COGNITO_PREFIX=moneta-personale-univoco ./scripts/deploy.sh` per scegliere un prefisso alternativo.
-
-**Dovrai creare un nuovo utente Cognito** a Milano, e configurare una nuova password e MFA TOTP. Le identità del vecchio User Pool non vengono migrate.
-
-## 5. Funzionalità e costi
-
-- Home con **saldo attuale**, entrate/uscite, ultimi sette movimenti e grafici a linee degli ultimi sei mesi.
-- Movimenti manuali con inserimento, modifica, eliminazione ed esportazione.
-- Regole di ricorrenza settimanali, mensili, trimestrali e annuali, modificabili, sospendibili e con intervalli 1–12. EventBridge Scheduler richiama la Lambda ogni giorno alle **06:10 Europe/Rome**: le scritture con ID deterministico e controllo di esistenza evitano doppioni.
-- Costi AWS dell'intero account tramite Cost Explorer, con cache di 24 ore per ridurre le chiamate (Cost Explorer può addebitare circa $0.01 per richiesta; l'importo dipende dal listino vigente).
-- Budget AWS mensile 3 USD per l'intero account, con avvisi al 50%, 75%, 100% e sul superamento previsto.
-- DynamoDB provisioned 5 RCU/5 WCU, senza PITR; CloudWatch log 7 giorni, HTTP API throttling a 2 richieste/s e burst 5. Non sono garanzie di spesa massima.
-
-**Il tuo tetto desiderato è 4 EUR/mese.** AWS pay-as-you-go non offre una garanzia assoluta di non superarlo: i budget inviano avvisi ma non arrestano automaticamente la fatturazione. Controlla i costi e tieni attiva l'MFA dell'identità amministrativa AWS.
-
-## 6. Test locali
-
-```bash
-python3 -m pip install boto3 pyyaml
 python3 -m unittest discover -s tests -v
 python3 -m py_compile lambda/index.py
-bash -n scripts/deploy.sh scripts/deploy_budget.sh
 node --check frontend/app.js
+bash -n scripts/*.sh
 ```
 
-La suite valida logica Lambda e consistenza delle risorse, ma **non** equivale a un deploy reale su AWS. L'autenticazione Cognito, il funzionamento HTTPS e la disponibilità delle quote si verificano nel tuo account dopo il deploy.
+Lo script `sync_lambda.py` compone automaticamente il file inline `backend.yml`
+partendo da `lambda/index.py`, eliminando i commenti/docstring nel solo template.
+Si arresta se supera il limite AWS di **51.200 byte**. Non serve un nuovo bucket
+S3 di deploy.
 
-## 7. Gestione successiva del dominio
-
-Quando potrai accedere a GoDaddy, aggiungeremo `moneta.ilsitodipatrizio.it` e un certificato ACM gratuito per CloudFront in `us-east-1`, con record CNAME di validazione e di instradamento. GoDaddy resta registrar e gestore DNS. Questa configurazione **non** è inclusa nel deploy attuale.
-
-## 8. Collegare Moneta a `moneta.ilsitodipatrizio.it` (GoDaddy, HTTPS AWS)
-
-Questa versione supporta il sottodominio senza richiedere Route 53 o un certificato GoDaddy. Mantiene la distribuzione CloudFront, il Cognito User Pool e le altre risorse esistenti. **Il certificato HTTPS viene emesso da AWS ACM in `us-east-1`, gratuitamente se associato a CloudFront.** Non acquistare SSL GoDaddy. Il DNS deve essere effettivamente gestito dai nameserver di GoDaddy; altrimenti aggiungi i record presso il provider DNS autorevole.
-
-### Fase A — Richiedere il certificato, leggere i CNAME
-
-Da CloudShell / terminale autenticato AWS, nella root del repository aggiornato:
+## 3. Deploy negli stessi stack
 
 ```bash
-./scripts/domain_request.sh
+bash scripts/deploy.sh
 ```
 
-Lo script controlla `moneta-frontend`, riutilizza un certificato pubblico ACM già esistente per il sottodominio oppure lo richiede, e mostra **l'ARN del certificato** e **i due CNAME GoDaddy**. Non scrive alcun record DNS: non abbiamo accesso all'account GoDaddy. Il record di validazione ACM è disponibile solo dopo la richiesta reale; non usare valori di esempio.
+Il comando mantiene automaticamente il dominio e il certificato ACM salvati
+negli stack correnti, recupera il prefisso Cognito preesistente e rigenera
+`frontend/config.json`. Pubblica frontend S3 e invalida CloudFront. Durante
+l'aggiornamento, le API potrebbero essere temporaneamente indisponibili.
 
-Su GoDaddy: **Portfolio domini > ilsitodipatrizio.it > DNS > Aggiungi record**. Inserisci **prima** il CNAME di verifica ACM riportato dallo script, per esempio (VALORI NON REALI):
+**Verifica il Change Set** in CloudFormation prima di applicare aggiornamenti su
+risorse critiche, se vuoi un controllo aggiuntivo. Non deve sostituire
+`UserPool` o `DataTable`. Il template lascia immutati i rispettivi logical ID.
 
-| Tipo | Nome | Valore | TTL |
+### Diventa amministratore della dashboard AWS
+
+Il deploy crea **il gruppo**, ma non iscrive automaticamente nessuno.
+Per aggiungere il tuo account Cognito, dalla root del progetto:
+
+```bash
+bash scripts/add_admin.sh tua-email-cognito@example.it
+```
+
+Lo script verifica il nome dell'utente, chiede conferma e chiama
+`admin-add-user-to-group`. Esci dall'app e accedi nuovamente, così Cognito
+rilascia un access token con il claim `cognito:groups` aggiornato.
+
+**Non associare ruoli IAM AWS agli utenti Moneta:** il gruppo definisce
+soltanto l'accesso logico alle dashboard amministrative.
+
+## 4. Aggiungere una persona
+
+- Crea per la persona un account nel **medesimo** User Pool Cognito di Milano.
+  Mantieni l'email verificata, una password personale e la MFA TOTP.
+  Cognito continua a vietare l'auto-registrazione pubblica.
+- La persona completa la sua prima autenticazione su Moneta.
+- Dal tuo account crea un bilancio condiviso, selezionalo, poi apri **Bilanci condivisi > Invita**.
+- L'invito è visibile nella sezione **Bilanci condivisi > Inviti ricevuti** del destinatario. Il destinatario può accettare o rifiutare. Scade dopo 7 giorni.
+- Gli utenti normali non vedono **Costi AWS** né possono accedere all'endpoint `/costs` (403).
+
+## 5. Matrice permessi
+
+| Azione | Proprietario | Membro (editor) | Lettore (viewer) |
 |---|---|---|---|
-| CNAME | `_a1b2c3.moneta` | `_x1y2z3.acm-validations.aws` | predefinito |
+| Leggere movimenti, ricorrenze, budget | sì | sì | sì |
+| Inserire, modificare o eliminare movimenti | sì | sì | no |
+| Modificare ricorrenze e budget | sì | sì | no |
+| Invitare o rimuovere membri | sì | no | no |
 
-Il nome su GoDaddy è relativo al dominio, quindi **non aggiungere `ilsitodipatrizio.it` una seconda volta**. Non sostituire i record MX, A o www del sito principale. Se il record non compare ancora in ACM, riesegui lo stesso script.
+Il gruppo `Admins` **non bypassa** la verifica di appartenenza allo spazio.
+Le richieste ai dati condivisi richiedono `spaceId`, verificato sulla Lambda.
+Il browser non determina mai il proprietario dei dati.
 
-### Fase B — Verificare l'emissione del certificato
+## 6. Esempi contabili
 
-```bash
-aws acm describe-certificate \
-  --region us-east-1 \
-  --certificate-arn 'ARN_RESTITUITO_DALLO_SCRIPT' \
-  --query 'Certificate.Status' --output text
-```
+| Operazione di 50 EUR | Spazio Casa | Personale di chi l'ha creata |
+|---|---|---|
+| Spesa pagata dal fondo | saldo fondo −50 | storico: 50 EUR, saldo invariato |
+| Spesa pagata personalmente | report: −50, saldo fondo invariato | saldo personale −50 |
+| Versamento personale al fondo | saldo fondo +50 | saldo personale −50 |
 
-Prosegui **solo quando mostra `ISSUED`**. DNS e ACM potrebbero richiedere tempo. Puoi mantenere per sempre il CNAME di verifica, utile per il rinnovo automatico.
+Ogni spesa familiare produce **una sola operazione originale**; la copia
+personale è una proiezione di sola lettura. Modifiche/eliminazioni alla fonte
+aggiornano/eliminano il collegamento. È possibile esportare i dati dallo
+spazio selezionato.
 
-### Fase C — Attivare CloudFront + Cognito + CORS senza reinstallare
+## 7. Controlli dopo il deploy
 
-```bash
-./scripts/domain_activate.sh 'ARN_RESTITUITO_DALLO_SCRIPT'
-```
+1. Apri `https://moneta.ilsitodipatrizio.it`, accedi con l'account attuale e verifica che tutti i movimenti personali siano presenti.
+2. Crea lo spazio **Casa**; registra una spesa dal fondo; torna al personale: deve comparire nello storico ma **non** ridurre il saldo personale.
+3. Registra una spesa personale nello spazio Casa: deve ridurre il saldo personale, ma **non** il saldo del fondo.
+4. Modifica la spesa nello spazio Casa: entrambe le viste devono mostrare l'importo aggiornato. Poi elimina un movimento di prova.
+5. Prova con un altro account Cognito e verifica che senza invito non possa accedere allo spazio Casa neppure inviando manualmente richieste API.
+6. Verifica ruolo viewer senza facoltà di modifica e che `/costs` restituisca `403` per i non admin.
+7. Dopo una ricorrenza di test verifica che Scheduler non produca due movimenti; non avviare manualmente il tick se non necessario.
 
-Lo script rifiuta certificati non emessi o intestati a un dominio diverso. Aggiorna **gli stessi** stack `moneta-frontend` (`us-east-1`) e `moneta-backend` (`eu-south-1`), aggiungendo l'alias a CloudFront e l'URL HTTPS alle liste Cognito di callback/logout e alle origini CORS. Mantiene inoltre gli URL CloudFront già consentiti. Pubblica nuovamente i file statici e invalida la cache. Non sostituisce l'User Pool.
+## 8. Vincoli e funzionalità future
 
-### Fase D — Inserire il CNAME che indirizza al sito
+- Questa versione non supporta ancora divisione delle spese in quote 50/50,
+  trasferimento della proprietà, cancellazione completa di uno spazio,
+  registrazione pubblica o notifica email degli inviti.
+- I movimenti personali **già acquisiti** dall'autore rimangono nel suo storico
+  anche dopo l'eventuale revoca dell'accesso allo spazio, ma non consentono di
+  accedere agli altri dati del bilancio condiviso.
+- Le ricorrenze familiari associate a pagamento personale vengono sospese se
+  l'autore non è più membro, per evitare addebiti fantasma. Le ricorrenze
+  alimentate dal fondo possono proseguire senza creare collegamenti personali
+  a utenti revocati.
+- Le ricorrenze sono ancora scansionate giornalmente (massimo 1500 regole):
+  per molti utenti servirà un GSI con scadenze; DynamoDB rimane `PROVISIONED`
+  a 5 RCU/5 WCU e il throughput va monitorato durante l'uso multiutente.
+- S3+CloudFront restano pubblici **solo per l'HTML/JS statico**; i dati
+  restano dietro JWT Cognito, MFA e autorizzazioni server-side.
+- L'obiettivo di spesa **sotto circa 4 €/mese** non è un tetto AWS vincolante:
+  i budget sono avvisi, non interruttori automatici. Verifica regolarmente il
+  traffico e gli addebiti reali.
+- Un utente con privilegi IAM amministrativi sull'**account AWS** può
+  tecnicamente ispezionare DynamoDB al di fuori di Moneta: il limite degli admin
+  applicativi non sostituisce la sicurezza dell'account cloud.
+- Non sono state eseguite operazioni sul tuo account AWS in questa sessione.
 
-Dal risultato di `./scripts/domain_request.sh`, copia il record restante su GoDaddy (valore di esempio NON REALE):
+## 9. Ripristino della versione precedente
 
-| Tipo | Nome | Valore | TTL |
-|---|---|---|---|
-| CNAME | `moneta` | `dxxxxxxxxxxxxx.cloudfront.net` | predefinito |
+Conserva lo ZIP del progetto **precedente**. Se desideri annullare il deploy,
+ripristina i file di quella versione ed esegui `bash scripts/deploy.sh`.
+L'archivio personale `USER#sub` non viene migrato né cancellato; le nuove righe
+`SPACE#...` rimarranno nella tabella, non utilizzate dalla vecchia applicazione.
 
-**Non creare record A verso un indirizzo IP di CloudFront.** Se esiste già un record `moneta`, correggi il conflitto prima di aggiungere il CNAME. Il CNAME non serve per il dominio root, che resta invariato.
-
-Verifica:
-
-```bash
-nslookup moneta.ilsitodipatrizio.it
-curl -I https://moneta.ilsitodipatrizio.it
-```
-
-Apri `https://moneta.ilsitodipatrizio.it` in navigazione privata e prova il login con password + MFA TOTP; verifica il caricamento del saldo e i movimenti e il logout. Non inviare qui password, codici MFA o token. L'indirizzo CloudFront AWS resta accessibile e supportato per l'accesso a Moneta (ma nessun dato è pubblico senza JWT valido).
-
-**Promemoria sicurezza/costi:** HTTPS è gratuito con ACM e CloudFront, ma il DNS pubblico non blocca bot né rende i contenuti HTML statici privati. Moneta mantiene autenticazione Cognito/MFA e API protette con JWT; AWS Budgets resta un sistema di notifica, non un tetto di fatturazione.
+Consulta `docs/README-originale.md` per la documentazione storica del progetto.

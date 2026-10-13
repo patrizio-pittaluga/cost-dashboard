@@ -144,7 +144,7 @@ def month_offset(start, step):
 
 def occurrence_at(rule, index):
     start = date_value(rule['startDate'])
-    step = index*rule['interval']
+    step = index*int(rule['interval'])
     freq = rule['frequency']
     if freq == 'weekly':
         return start + dt.timedelta(days=7*step)
@@ -161,10 +161,10 @@ def due_dates(rule, today):
         return []
     elapsed = (limit-start).days
     if rule['frequency'] == 'weekly':
-        last_index = elapsed//(7*rule['interval'])
+        last_index = elapsed//(7*int(rule['interval']))
     else:
         span = (limit.year-start.year)*12 + limit.month-start.month
-        width = rule['interval']*{'monthly':1,'quarterly':3,'yearly':12}[rule['frequency']]
+        width = int(rule['interval'])*{'monthly':1,'quarterly':3,'yearly':12}[rule['frequency']]
         last_index = span//width + 1
     result = []
     for i in range(max(0,last_index-23),last_index+2):
@@ -174,36 +174,59 @@ def due_dates(rule, today):
     return result[-24:]
 
 def run_recurring(today=None):
-    # Lo Scheduler parte alle 06:10 Europe/Rome: a quell'ora data UTC e data italiana coincidono.
+    """Job giornaliero condiviso. Un solo movimento per spazio e scadenza.
+
+    La proiezione personale è nella stessa TransactWriteItems del movimento
+    familiare. Le righe legacy personali continuano a funzionare inalterate.
+    """
     today = today or dt.datetime.now(dt.timezone.utc).date()
-    created = 0
-    # La tabella è piccola (uso personale); scan paginata, limite di sicurezza.
-    last = None
-    count = 0
+    created, count, last = 0, 0, None
     while True:
-        args = {'FilterExpression': 'begins_with(SK, :prefix)', 'ExpressionAttributeValues': {':prefix':'REC#'}}
+        args = {'FilterExpression': 'begins_with(SK, :prefix)',
+                'ExpressionAttributeValues':{':prefix':'REC#'}}
         if last:
             args['ExclusiveStartKey'] = last
         result = TABLE.scan(**args)
         for row in result.get('Items', []):
             count += 1
-            if count > 200:
-                raise RuntimeError('Troppe regole per il piano personale')
+            if count > 1500:
+                raise RuntimeError('Troppe ricorrenze: è necessario passare a un indice dedicato')
             rule = row['value']
-            for due in due_dates(rule, today):
-                # ID deterministico: la stessa scadenza non si registra due volte.
-                txid = 'rec-' + rule['id'][:45] + '-' + due.strftime('%Y%m%d')
-                tx = {k:rule[k] for k in ('description','type','category','note','amountCents')}
-                tx.update({'id':txid, 'date':due.isoformat(), 'recurringId':rule['id']})
+            for due in due_dates(rule,today):
+                txid = 'rec-'+rule['id'][:45]+'-'+due.strftime('%Y%m%d')
+                rec = {k:rule[k] for k in ('description','type','category','note','amountCents')}
+                rec.update({'id':txid,'date':due.isoformat(),'recurringId':rule['id']})
                 try:
-                    TABLE.put_item(Item={'PK':row['PK'], 'SK':'TX#'+txid, 'value':tx}, ConditionExpression='attribute_not_exists(PK)')
+                    if row['PK'].startswith('SPACE#'):
+                        sid = row['PK'][6:]
+                        creator = rule.get('createdBy')
+                        share_record(rec, rule.get('paymentSource','fund'))
+                        rec['createdBy'] = creator or ''
+                        if rec['paymentSource'] == 'personal' and (not creator or not get_row(row['PK'],'MEMBER#'+creator)):
+                            LOG.warning('Ricorrenza %s: autore non più membro, pagamento personale sospeso', rule['id'])
+                            continue
+                        actions = [put_action({'PK':row['PK'],'SK':'TX#'+txid,'value':rec})]
+                        if creator and get_row(row['PK'],'MEMBER#'+creator):
+                            mirror = mirrored_transaction(sid,rec)
+                            actions.append(put_action({'PK':user_key(creator),
+                                                       'SK':'TX#'+mirror['id'],'value':mirror}))
+                        txn(actions)
+                    else:
+                        TABLE.put_item(Item={'PK':row['PK'],'SK':'TX#'+txid,'value':rec},
+                                       ConditionExpression='attribute_not_exists(PK)')
                     created += 1
                 except ClientError as err:
-                    if err.response['Error']['Code'] != 'ConditionalCheckFailedException':
-                        raise
+                    code = err.response['Error']['Code']
+                    if code == 'ConditionalCheckFailedException':
+                        continue
+                    if code == 'TransactionCanceledException':
+                        # Transazione duplicata se Scheduler ritenta dopo un timeout.
+                        if get_row(row['PK'],'TX#'+txid):
+                            continue
+                    raise
         last = result.get('LastEvaluatedKey')
         if not last:
-            return {'created': created, 'rules': count, 'date': today.isoformat()}
+            return {'created':created,'rules':count,'date':today.isoformat()}
 
 def load_costs(pk):
     """Una sola chiamata Cost Explorer ogni 24h per utente; query manuale."""
@@ -243,91 +266,453 @@ def load_costs(pk):
     TABLE.put_item(Item={**key,'nextRefresh':now+86400,'payloadJson':json.dumps(payload,ensure_ascii=False)})
     return payload
 
+# --- Moneta 2.0: accessi per spazio, inviti e contabilità collegata ---
+import hashlib
+import uuid
+from boto3.dynamodb.types import TypeSerializer
+
+SERIALIZER = TypeSerializer()
+USER_POOL_ID = os.environ['USER_POOL_ID']
+SPACES_LIMIT = 15
+MEMBERS_LIMIT = 20
+
+
+def user_key(sub):
+    return 'USER#' + sub
+
+
+def space_key(space_id):
+    if not isinstance(space_id, str) or not re.fullmatch(r's-[0-9a-f]{32}', space_id):
+        raise BadRequest('Identificativo del bilancio non valido')
+    return 'SPACE#' + space_id
+
+
+def groups_admin(claims):
+    groups = claims.get('cognito:groups', [])
+    if isinstance(groups, str):
+        groups = [part.strip().strip('"\'') for part in groups.strip('[]').split(',')]
+    return isinstance(groups, list) and 'Admins' in groups
+
+
+def get_row(pk, sk):
+    return TABLE.get_item(Key={'PK':pk,'SK':sk}, ConsistentRead=True).get('Item')
+
+
+def list_prefix(pk, prefix):
+    items, last = [], None
+    while True:
+        params = {'KeyConditionExpression':'PK = :pk AND begins_with(SK, :prefix)',
+                  'ExpressionAttributeValues':{':pk':pk, ':prefix':prefix}}
+        if last:
+            params['ExclusiveStartKey'] = last
+        data = TABLE.query(**params)
+        items.extend(data.get('Items', []))
+        if len(items) > 10000:
+            raise BadRequest('Archivio troppo grande')
+        last = data.get('LastEvaluatedKey')
+        if not last:
+            return items
+
+
+def membership(space_id, sub, write=False, owner=False):
+    sk = space_key(space_id)
+    row = get_row(sk, 'MEMBER#'+sub)
+    role = (row or {}).get('role')
+    if role not in ('owner','editor','viewer') or (owner and role != 'owner') or (write and role == 'viewer'):
+        raise PermissionError('Non hai accesso a questo bilancio o i permessi necessari')
+    return role
+
+
+def auth_check(space_id, sub, owner=False):
+    return {'ConditionCheck':{'TableName':TABLE.name,
+        'Key':wire({'PK':space_key(space_id),'SK':'MEMBER#'+sub}),
+        'ConditionExpression':'#role = :expected' if owner else '#role IN (:owner, :editor)',
+        'ExpressionAttributeNames':{'#role':'role'},
+        'ExpressionAttributeValues':(
+            {':expected':SERIALIZER.serialize('owner')} if owner else
+            {':owner':SERIALIZER.serialize('owner'), ':editor':SERIALIZER.serialize('editor')})}}
+
+
+def wire(item):
+    return {k:SERIALIZER.serialize(v) for k,v in item.items()}
+
+
+def txn(actions):
+    # Un'unica tabella; la transazione è atomica, anche se contiene una proiezione personale.
+    boto3.client('dynamodb').transact_write_items(TransactItems=actions)
+
+
+def put_action(item, condition='attribute_not_exists(PK)', values=None):
+    out = {'TableName':TABLE.name, 'Item':wire(item)}
+    if condition:
+        out['ConditionExpression'] = condition
+    if values:
+        out['ExpressionAttributeValues'] = wire(values)
+    return {'Put':out}
+
+
+def del_action(pk, sk, condition='attribute_exists(PK)', values=None):
+    out = {'TableName':TABLE.name, 'Key':wire({'PK':pk,'SK':sk}), 'ConditionExpression':condition}
+    if values:
+        out['ExpressionAttributeValues'] = wire(values)
+    return {'Delete':out}
+
+
+def linked_id(space_id, transaction_id):
+    digest = hashlib.sha256((space_id+'|'+transaction_id).encode('utf-8')).hexdigest()[:30]
+    return 'link-'+digest
+
+
+def mirrored_transaction(space_id, original):
+    """Proiezione personale; incide sul saldo solo se si usano soldi personali.
+
+    Un versamento personale al fondo diventa un'uscita personale e un'entrata comune.
+    Le spese dal fondo restano visibili nel personale ma NON lo addebitano.
+    """
+    personal_funded = original.get('paymentSource') == 'personal'
+    item = {k:original[k] for k in ('description','category','date','note','amountCents')}
+    item['id'] = linked_id(space_id, original['id'])
+    item['type'] = 'expense' if personal_funded else original['type']
+    if personal_funded and original['type'] == 'income':
+        item['description'] = 'Versamento al fondo · '+original['description']
+        item['category'] = 'Casa'
+    item.update({'linkedSpaceId':space_id, 'sourceTransactionId':original['id'],
+                 'affectsBalance':personal_funded, 'paymentSource':original['paymentSource'],
+                 'readOnly':True})
+    return item
+
+
+def shared_transaction(original, actor):
+    # Solo campi noti; non è possibile fabbricare createdBy dalla richiesta.
+    return {**original, 'createdBy':actor, 'paymentSource':'fund', 'affectsBalance':True}
+
+
+def share_record(record, source):
+    if source not in ('fund','personal'):
+        raise BadRequest('Origine pagamento non valida')
+    record['paymentSource'] = source
+    # Un'uscita pagata direttamente da un membro non consuma il fondo familiare.
+    record['affectsBalance'] = record['type'] == 'income' or source == 'fund'
+    return record
+
+
+def transaction_actions(space_id, actor, record, method):
+    pk = space_key(space_id)
+    sk = 'TX#'+record['id']
+    previous = get_row(pk, sk)
+    if method == 'create' and previous:
+        raise BadRequest('ID movimento già esistente')
+    if method == 'update' and (not previous or previous.get('skipped')):
+        raise KeyError('Movimento non trovato')
+    owner_id = (previous or {}).get('value', {}).get('createdBy', actor)
+    if method == 'update' and (previous.get('value') or {}).get('recurringId'):
+        record['recurringId'] = previous['value']['recurringId']
+    record['createdBy'] = owner_id
+    cond = 'attribute_not_exists(PK)' if method == 'create' else 'attribute_exists(PK)'
+    items = [auth_check(space_id, actor), put_action({'PK':pk,'SK':sk,'value':record},cond)]
+    mirrored = mirrored_transaction(space_id, record)
+    # Se l'autore non è più membro, non si reintroducono dati nel suo spazio personale.
+    if not get_row(pk, 'MEMBER#'+owner_id):
+        if method == 'create':
+            raise PermissionError('Autore non membro dello spazio')
+    else:
+        if owner_id != actor:
+            items.append(auth_check(space_id,owner_id))
+        mirror_row = {'PK':user_key(owner_id),'SK':'TX#'+mirrored['id'],'value':mirrored}
+        # Le modifiche devono ripristinare un collegamento coerente anche in caso di dati legacy.
+        items.append(put_action(mirror_row, 'attribute_not_exists(PK)' if method == 'create' else
+                                    'attribute_not_exists(PK) OR #v.linkedSpaceId = :sid',
+                                    None if method == 'create' else {':sid':space_id}))
+        if method == 'update':
+            items[-1]['Put']['ExpressionAttributeNames'] = {'#v':'value'}
+    txn(items)
+    return record
+
+
+def delete_shared_transaction(space_id, sub, rid):
+    pk = space_key(space_id)
+    row = get_row(pk, 'TX#'+rid)
+    if not row:
+        raise KeyError('Movimento non trovato')
+    if row.get('skipped'):
+        return
+    original = row.get('value') or {}
+    actions = [auth_check(space_id,sub)]
+    if original.get('recurringId'):
+        actions.append(put_action({'PK':pk,'SK':'TX#'+rid,'skipped':True}, 'attribute_exists(PK)'))
+    else:
+        actions.append(del_action(pk,'TX#'+rid))
+    creator = original.get('createdBy')
+    if creator:
+        mirror_sk = 'TX#'+linked_id(space_id, rid)
+        mirror = get_row(user_key(creator),mirror_sk)
+        if mirror:
+            actions.append(del_action(user_key(creator),mirror_sk))
+    txn(actions)
+
+
+def new_space(sub, payload):
+    title = payload.get('name')
+    if not isinstance(title, str) or not 2 <= len(title.strip()) <= 60:
+        raise BadRequest('Nome del bilancio: da 2 a 60 caratteri')
+    if len(list_prefix(user_key(sub),'SPACE#')) >= SPACES_LIMIT:
+        raise BadRequest('Numero massimo di bilanci raggiunto')
+    sid = 's-'+uuid.uuid4().hex
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    meta = {'id':sid, 'name':title.strip(), 'createdBy':sub, 'createdAt':stamp}
+    txn([put_action({'PK':space_key(sid),'SK':'META','value':meta}),
+         put_action({'PK':space_key(sid),'SK':'MEMBER#'+sub,'role':'owner','joinedAt':stamp}),
+         put_action({'PK':user_key(sub),'SK':'SPACE#'+sid,'role':'owner','name':meta['name']})])
+    return meta
+
+
+def user_spaces(sub):
+    return [{'id':r['SK'][6:], 'name':r['name'], 'role':r['role']}
+            for r in list_prefix(user_key(sub),'SPACE#')]
+
+
+def pending_invites(sub):
+    now = int(time.time())
+    return [r['value'] for r in list_prefix(user_key(sub),'INV#')
+            if int(r['value'].get('expiresAt',0)) > now]
+
+
+def invite_member(space_id, sub, payload):
+    membership(space_id, sub, owner=True)
+    email = payload.get('email','')
+    role = payload.get('role', 'editor')
+    if not isinstance(email,str) or not re.fullmatch(r'[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.-]{1,250}\.[A-Za-z]{2,20}', email) or role not in ('editor','viewer'):
+        raise BadRequest('Email o ruolo non valido')
+    if len(list_prefix(space_key(space_id), 'MEMBER#')) >= MEMBERS_LIMIT:
+        raise BadRequest('Numero massimo di membri raggiunto')
+    cognito = boto3.client('cognito-idp')
+    result = cognito.list_users(UserPoolId=USER_POOL_ID, Filter='email = "'+email.lower()+'"', Limit=2)
+    users = result.get('Users',[])
+    target = None
+    for user in users:
+        attrs = {a['Name']:a['Value'] for a in user.get('Attributes', [])}
+        if attrs.get('email','').lower() == email.lower() and attrs.get('email_verified') == 'true':
+            target = attrs.get('sub')
+    if not target or target == sub:
+        raise BadRequest('Destinatario non trovato o indirizzo non verificato in Cognito')
+    if len(list_prefix(user_key(target),'INV#')) >= 20:
+        raise BadRequest('Il destinatario ha troppi inviti in sospeso')
+    if get_row(space_key(space_id),'MEMBER#'+target):
+        raise BadRequest('La persona partecipa già a questo bilancio')
+    meta = get_row(space_key(space_id),'META')
+    if not meta:
+        raise BadRequest('Bilancio inesistente')
+    iid = 'i-'+uuid.uuid4().hex
+    invite = {'id':iid,'spaceId':space_id,'spaceName':meta['value']['name'],
+              'role':role,'email':email.lower(),'invitedBy':sub,'expiresAt':int(time.time())+7*86400}
+    txn([auth_check(space_id,sub,owner=True),
+         put_action({'PK':user_key(target),'SK':'INV#'+iid,'value':invite}),
+         put_action({'PK':space_key(space_id),'SK':'INV#'+iid,'target':target,'value':invite})])
+    return {'sent':True, 'expiresAt':invite['expiresAt']}
+
+
+def accept_invite(sub, invite_id, accept):
+    if not re.fullmatch(r'i-[0-9a-f]{32}', invite_id or ''):
+        raise BadRequest('Invito non valido')
+    item = get_row(user_key(sub),'INV#'+invite_id)
+    inv = (item or {}).get('value')
+    if not inv or inv['expiresAt'] <= int(time.time()):
+        raise KeyError('Invito inesistente o scaduto')
+    sid = inv['spaceId']
+    actions = [del_action(user_key(sub),'INV#'+invite_id),
+               del_action(space_key(sid),'INV#'+invite_id)]
+    if accept:
+        if not get_row(space_key(sid),'META'):
+            raise KeyError('Bilancio eliminato')
+        stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        actions.extend([put_action({'PK':space_key(sid),'SK':'MEMBER#'+sub,
+                                    'role':inv['role'],'email':inv.get('email',''),'joinedAt':stamp}),
+                        put_action({'PK':user_key(sub),'SK':'SPACE#'+sid,
+                                    'role':inv['role'],'name':inv['spaceName']})])
+    txn(actions)
+    return {'accepted':accept,'spaceId':sid}
+
+
+def remove_member(space_id, sub, target):
+    membership(space_id,sub,owner=True)
+    if target == sub:
+        raise BadRequest('Il proprietario non può lasciare il proprio bilancio')
+    if not isinstance(target,str) or not re.fullmatch(r'[0-9a-fA-F-]{16,64}',target):
+        raise BadRequest('Identificativo membro non valido')
+    member = get_row(space_key(space_id),'MEMBER#'+target)
+    if not member:
+        raise KeyError('Membro inesistente')
+    if member.get('role') == 'owner':
+        raise BadRequest('Non è possibile rimuovere il proprietario')
+    txn([auth_check(space_id,sub,owner=True),
+         del_action(space_key(space_id),'MEMBER#'+target,'#role <> :owner', {':owner':'owner'}),
+         del_action(user_key(target),'SPACE#'+space_id)])
+    return {'removed':True}
+
+
+def list_members(space_id, sub):
+    membership(space_id,sub)
+    return [{'id':row['SK'][7:],'role':row['role'],'email':row.get('email','')}
+            for row in list_prefix(space_key(space_id),'MEMBER#')]
+
+
+def state_for(pk):
+    tx, budgets, rules = [], {}, []
+    for row in query_user(pk):
+        sk = row['SK']
+        if sk.startswith('TX#') and not row.get('skipped'):
+            tx.append(public(row['value']))
+        elif sk.startswith('B#'):
+            budgets[sk[2:]] = int(row['amountCents'])/100
+        elif sk.startswith('REC#'):
+            rules.append(public(row['value']))
+    return {'transactions':tx,'budgets':budgets,'recurring':rules}
+
+
+def handle_request(event, claims, sub, pk, route, params):
+    space_id = (event.get('queryStringParameters') or {}).get('spaceId') or None
+    if route == 'GET /me':
+        return response(200, {'userId':sub,'isAdmin':groups_admin(claims),
+                              'spaces':user_spaces(sub),'invites':pending_invites(sub)})
+    if route == 'POST /spaces':
+        return response(201,new_space(sub,body_json(event)))
+    if route == 'GET /spaces/{id}/members':
+        return response(200,{'members':list_members(params.get('id'),sub)})
+    if route == 'POST /spaces/{id}/invites':
+        return response(201,invite_member(params.get('id'),sub,body_json(event)))
+    if route == 'POST /invites/{id}/accept':
+        return response(200,accept_invite(sub,params.get('id'),True))
+    if route == 'POST /invites/{id}/decline':
+        return response(200,accept_invite(sub,params.get('id'),False))
+    if route == 'DELETE /spaces/{id}/members/{userId}':
+        return response(200,remove_member(params.get('id'),sub,params.get('userId')))
+
+    # Non basta un parametro dal frontend: ogni richiesta allo spazio richiede
+    # una verifica del membro sul server. Le scritture condivise ripetono
+    # la verifica nella stessa transazione che aggiorna i dati.
+    if space_id:
+        membership(space_id, sub, write=route.startswith(('PUT ', 'POST ', 'DELETE ')))
+        data_pk = space_key(space_id)
+    else:
+        data_pk = pk
+    if route == 'GET /state':
+        return response(200,state_for(data_pk))
+    if route == 'GET /costs':
+        if not groups_admin(claims):
+            return response(403,{'error':'Dashboard amministrativa riservata agli Admins'})
+        return response(200,load_costs('SYSTEM#AWS_COSTS'))
+    if route in ('POST /transactions','PUT /transactions/{id}'):
+        rid = params.get('id') if route.startswith('PUT') else None
+        payload = body_json(event)
+        record = validate_record(payload,rid)
+        if space_id:
+            share_record(record, payload.get('paymentSource','fund'))
+            method = 'update' if rid else 'create'
+            return response(200 if rid else 201,public(transaction_actions(space_id,sub,record,method)))
+        if rid:
+            previous = get_row(pk,'TX#'+rid) or {}
+            if previous.get('skipped'):
+                raise KeyError('Movimento eliminato')
+            if (previous.get('value') or {}).get('linkedSpaceId'):
+                return response(403,{'error':'Modifica il movimento nel bilancio condiviso originale'})
+            rec_id = (previous.get('value') or {}).get('recurringId')
+            if rec_id:
+                record['recurringId'] = rec_id
+        try:
+            TABLE.put_item(Item={'PK':pk,'SK':'TX#'+record['id'],'value':record},
+                           ConditionExpression='attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')
+        except ClientError as err:
+            if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                return response(404 if rid else 409,{'error':'Movimento inesistente o duplicato'})
+            raise
+        return response(200 if rid else 201,public(record))
+    if route in ('DELETE /transactions/{id}','DELETE /recurring/{id}'):
+        rid = params.get('id')
+        if not isinstance(rid,str) or not ID_RE.fullmatch(rid):
+            raise BadRequest('ID non valido')
+        if space_id and route.startswith('DELETE /transactions'):
+            delete_shared_transaction(space_id,sub,rid)
+            return response(204)
+        sk = ('TX#' if 'transactions' in route else 'REC#') + rid
+        old = get_row(data_pk,sk) or {}
+        if sk.startswith('TX#'):
+            if old.get('skipped'):
+                return response(204)
+            if not space_id and (old.get('value') or {}).get('linkedSpaceId'):
+                return response(403,{'error':'Elimina il movimento dal bilancio condiviso'})
+            if (old.get('value') or {}).get('recurringId'):
+                if space_id:
+                    txn([auth_check(space_id,sub),put_action({'PK':data_pk,'SK':sk,'skipped':True},'attribute_exists(PK)')])
+                else:
+                    TABLE.put_item(Item={'PK':data_pk,'SK':sk,'skipped':True},ConditionExpression='attribute_exists(PK)')
+                return response(204)
+        try:
+            if space_id:
+                txn([auth_check(space_id,sub),del_action(data_pk,sk)])
+            else:
+                TABLE.delete_item(Key={'PK':data_pk,'SK':sk},ConditionExpression='attribute_exists(PK)')
+        except ClientError as err:
+            if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                return response(404,{'error':'Elemento inesistente'})
+            raise
+        return response(204)
+    if route in ('POST /recurring','PUT /recurring/{id}'):
+        rid = params.get('id') if route.startswith('PUT') else None
+        payload = body_json(event)
+        record = validate_rule(payload,rid)
+        if space_id:
+            source = payload.get('paymentSource','fund')
+            if source not in ('fund','personal'):
+                raise BadRequest('Origine pagamento non valida')
+            record['paymentSource'] = source
+            previous = get_row(data_pk,'REC#'+rid) if rid else None
+            record['createdBy'] = ((previous or {}).get('value') or {}).get('createdBy',sub)
+            actions = [auth_check(space_id,sub),put_action({'PK':data_pk,'SK':'REC#'+record['id'],'value':record},
+                                            'attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')]
+            txn(actions)
+            return response(200 if rid else 201,public(record))
+        try:
+            TABLE.put_item(Item={'PK':pk,'SK':'REC#'+record['id'],'value':record},
+                           ConditionExpression='attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')
+        except ClientError as err:
+            if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                return response(404 if rid else 409,{'error':'Ricorrenza inesistente o duplicata'})
+            raise
+        return response(200 if rid else 201,public(record))
+    if route == 'PUT /budgets/{category}':
+        cat = params.get('category')
+        if cat not in EXPENSE:
+            raise BadRequest('Categoria budget non valida')
+        amount = cents(body_json(event).get('amount'),allow_zero=True)
+        if space_id:
+            txn([auth_check(space_id,sub),put_action({'PK':data_pk,'SK':'B#'+cat,'amountCents':amount},None)])
+        else:
+            TABLE.put_item(Item={'PK':pk,'SK':'B#'+cat,'amountCents':amount})
+        return response(200,{'category':cat,'amount':amount/100})
+    return response(404,{'error':'Rotta inesistente'})
+
+
 def handler(event, context):
-    # EventBridge non è un endpoint pubblico e può invocare solo via permessi IAM.
     if event.get('source') == 'aws.scheduler' and event.get('operation') == 'recurring-tick':
         return run_recurring()
     claims = (((event.get('requestContext') or {}).get('authorizer') or {}).get('jwt') or {}).get('claims') or {}
     sub = claims.get('sub')
     if not isinstance(sub,str) or not sub or claims.get('token_use') != 'access' or claims.get('client_id') != CLIENT_ID:
-        return response(403, {'error':'Access token Cognito richiesto'})
-    pk = 'USER#'+sub
-    route = event.get('routeKey','')
-    params = event.get('pathParameters') or {}
+        return response(403,{'error':'Access token Cognito richiesto'})
     try:
-        if route == 'GET /state':
-            tx, budgets, rules = [], {}, []
-            for row in query_user(pk):
-                sk = row['SK']
-                if sk.startswith('TX#') and not row.get('skipped'):
-                    tx.append(public(row['value']))
-                elif sk.startswith('B#'):
-                    budgets[sk[2:]] = int(row['amountCents'])/100
-                elif sk.startswith('REC#'):
-                    rules.append(public(row['value']))
-            return response(200, {'transactions':tx, 'budgets':budgets, 'recurring':rules})
-        if route == 'GET /costs':
-            return response(200, load_costs(pk))
-        if route in ('POST /transactions','PUT /transactions/{id}'):
-            rid = params.get('id') if route.startswith('PUT') else None
-            record = validate_record(body_json(event), rid)
-            key = {'PK':pk, 'SK':'TX#'+record['id'], 'value':record}
-            if rid:
-                previous = TABLE.get_item(Key={'PK':pk,'SK':'TX#'+rid}).get('Item') or {}
-                if previous.get('skipped'):
-                    return response(404,{'error':'Movimento eliminato'})
-                rec_id = (previous.get('value') or {}).get('recurringId')
-                if rec_id:
-                    record['recurringId'] = rec_id
-            cond = 'attribute_exists(PK)' if rid else 'attribute_not_exists(PK)'
-            try:
-                TABLE.put_item(Item=key,ConditionExpression=cond)
-            except ClientError as err:
-                if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                    return response(404 if rid else 409, {'error':'Movimento inesistente' if rid else 'ID già esistente'})
-                raise
-            return response(200 if rid else 201, public(record))
-        if route in ('DELETE /transactions/{id}', 'DELETE /recurring/{id}'):
-            rid = params.get('id')
-            if not isinstance(rid,str) or not ID_RE.fullmatch(rid):
-                raise BadRequest('ID non valido')
-            sk = ('TX#' if 'transactions' in route else 'REC#') + rid
-            try:
-                if sk.startswith('TX#'):
-                    old = TABLE.get_item(Key={'PK':pk,'SK':sk}).get('Item') or {}
-                    if old.get('skipped'):
-                        return response(204)
-                    if (old.get('value') or {}).get('recurringId'):
-                        # Una tombstone impedisce che il job rigeneri un'occurrenza cancellata.
-                        TABLE.put_item(Item={'PK':pk,'SK':sk,'skipped':True},ConditionExpression='attribute_exists(PK)')
-                        return response(204)
-                TABLE.delete_item(Key={'PK':pk,'SK':sk},ConditionExpression='attribute_exists(PK)')
-            except ClientError as err:
-                if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                    return response(404, {'error':'Elemento inesistente'})
-                raise
-            return response(204)
-        if route in ('POST /recurring','PUT /recurring/{id}'):
-            rid = params.get('id') if route.startswith('PUT') else None
-            record = validate_rule(body_json(event),rid)
-            cond = 'attribute_exists(PK)' if rid else 'attribute_not_exists(PK)'
-            try:
-                TABLE.put_item(Item={'PK':pk,'SK':'REC#'+record['id'],'value':record},ConditionExpression=cond)
-            except ClientError as err:
-                if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                    return response(404 if rid else 409, {'error':'Ricorrenza non trovata' if rid else 'ID esistente'})
-                raise
-            return response(200 if rid else 201, public(record))
-        if route == 'PUT /budgets/{category}':
-            category = params.get('category')
-            if category not in EXPENSE:
-                raise BadRequest('Categoria budget non valida')
-            value = cents(body_json(event).get('amount'), allow_zero=True)
-            TABLE.put_item(Item={'PK':pk,'SK':'B#'+category,'amountCents':value})
-            return response(200,{'category':category,'amount':value/100})
-        return response(404,{'error':'Rotta inesistente'})
+        return handle_request(event,claims,sub,user_key(sub),event.get('routeKey',''),event.get('pathParameters') or {})
     except BadRequest as err:
         return response(400,{'error':str(err)})
+    except KeyError as err:
+        return response(404,{'error':str(err).strip("'")})
+    except PermissionError as err:
+        return response(403,{'error':str(err)})
+    except ClientError as err:
+        code = err.response.get('Error',{}).get('Code')
+        if code in ('ConditionalCheckFailedException','TransactionCanceledException'):
+            return response(409,{'error':'Conflitto o permessi modificati; aggiorna la pagina e riprova'})
+        LOG.exception('Errore AWS Moneta')
+        return response(500,{'error':'Errore interno'})
     except Exception:
         LOG.exception('Errore interno Moneta')
         return response(500,{'error':'Errore interno'})

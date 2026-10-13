@@ -1,5 +1,6 @@
 """Controlli strutturali CloudFormation offline (non sostituisce ValidateTemplate AWS)."""
 from pathlib import Path
+import ast
 import unittest
 import yaml
 
@@ -46,7 +47,8 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(x['UserPool']['Properties']['AdminCreateUserConfig']['AllowAdminCreateUserOnly'],True)
         self.assertEqual(x['DataTable']['Properties']['BillingMode'],'PROVISIONED')
         routes=[p for v in x.values() if v['Type']=='AWS::ApiGatewayV2::Route' for p in [v['Properties']]]
-        self.assertEqual(len(routes),9)
+        self.assertEqual(len(routes),16)
+        self.assertEqual(x['AdminsGroup']['Properties']['GroupName'],'Admins')
         self.assertTrue(all(p['AuthorizationType']=='JWT' and '!Ref' in p['AuthorizerId'] for p in routes))
         self.assertEqual(x['UserPoolDomain']['Properties']['ManagedLoginVersion'],1)
         self.assertIn('DailyRecurringSchedule',x)
@@ -58,7 +60,19 @@ class TestTemplates(unittest.TestCase):
         x=read_template('backend.yml')['Resources']
         source=(ROOT/'lambda'/'index.py').read_text(encoding='utf-8').strip()
         embedded=x['ApiLambda']['Properties']['Code']['ZipFile'].strip()
-        self.assertEqual(source,embedded)
+        # CloudFormation riceve Python AST equivalente, senza docstring e commenti.
+        class RemoveDocstrings(ast.NodeTransformer):
+            def visit_Module(self,node):
+                self.generic_visit(node)
+                if node.body and isinstance(node.body[0],ast.Expr) and isinstance(node.body[0].value,ast.Constant) and isinstance(node.body[0].value.value,str):node.body.pop(0)
+                return node
+            def visit_FunctionDef(self,node):
+                self.generic_visit(node)
+                if node.body and isinstance(node.body[0],ast.Expr) and isinstance(node.body[0].value,ast.Constant) and isinstance(node.body[0].value.value,str):node.body.pop(0)
+                return node
+        strip=lambda code: ast.dump(RemoveDocstrings().visit(ast.parse(code)),include_attributes=False)
+        self.assertEqual(strip(source),strip(embedded))
+        self.assertLessEqual((ROOT/'cloudformation'/'backend.yml').stat().st_size,51200)
 
     def test_budget_account_wide(self):
         x=read_template('budget.yml')['Resources']['AccountMonthlyBudget']['Properties']

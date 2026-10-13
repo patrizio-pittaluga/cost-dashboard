@@ -24,5 +24,5 @@ if [[ "$CERT_DOMAIN" != "$DOMAIN" ]]; then
   echo "Errore: certificato per $CERT_DOMAIN, atteso $DOMAIN." >&2
   exit 2
 fi
-MONETA_CUSTOM_DOMAIN="$DOMAIN" MONETA_ACM_CERT_ARN="$CERT_ARN" ./scripts/deploy.sh
+MONETA_CUSTOM_DOMAIN="$DOMAIN" MONETA_ACM_CERT_ARN="$CERT_ARN" bash ./scripts/deploy.sh
 printf '\nOra aggiungi su GoDaddy: CNAME moneta -> dominio CloudFront indicato sopra.\n'
