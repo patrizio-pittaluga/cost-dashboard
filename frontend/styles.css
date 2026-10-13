@@ -3,3 +3,10 @@
 @media(max-width:1060px){.shell{grid-template-columns:200px 1fr}.sidebar{padding:25px 10px}.panel{padding:19px}.chart-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.shell{display:block}.sidebar{min-height:auto;height:auto;position:static;padding:12px 14px;border-right:0;border-bottom:1px solid var(--stroke)}.sidebar .logo,.sidebar .nav-label,.sidebar-bottom{display:none}.navigation{flex-direction:row;gap:6px;overflow-x:auto}.nav-btn{white-space:nowrap;font-size:11px;padding:10px 12px;gap:6px}.nav-icon{font-size:16px;width:18px}.topbar{height:53px;padding:0 16px}.top-indicator{display:none}.content{padding:24px 14px 60px}.hero{padding:25px;min-height:180px}.metric-grid,.cost-grid{grid-template-columns:1fr 1fr}.metric:last-child{grid-column:span 2}.metric{padding:19px}.chart-grid{grid-template-columns:1fr}.hero-value{font-size:42px}}
 @media(max-width:480px){.metric-grid,.cost-grid{grid-template-columns:1fr}.metric:last-child{grid-column:auto}.form-grid{grid-template-columns:1fr}.page-title-row h1{font-size:27px}.panel{padding:15px}.metric strong{font-size:28px}.hero-value{font-size:39px}.dialog{padding:18px}}
+/* Moneta 2.0: gestione spazi e inviti */
+.space-select{width:min(270px,31vw);min-height:36px;padding:6px 10px;font-size:12px}
+.space-form{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin-top:20px}
+.space-form .field{flex:1 1 180px}
+.space-action{font-size:12px;padding:8px 12px}
+@media(max-width:760px){.space-select{width:min(205px,49vw)}.topbar-left{gap:6px}.topbar .breadcrumb,.topbar .crumb-sep{display:none}}
+@media(max-width:480px){.space-select{width:160px;font-size:10px}.topbar{padding:0 10px}.top-actions{gap:5px}}
