@@ -11,10 +11,11 @@ const base64url=bytes=>btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').re
 const localDay=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
 const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 const dateName=s=>new Date(s+'T12:00:00').toLocaleDateString('it-IT',{day:'2-digit',month:'short',year:'numeric'});
+let fundData=null,fundMembers=[],insightsData=null,reverseOperationId=null,capitalEditId=null;
 let config,token=null,state={transactions:[],budgets:{},recurring:[],planned:[]},favorites=[],calendarMonth=new Date(),calendarDate='',editPlanId=null,completePlanId=null,costs=null,month=new Date(),view='home',editId=null,editRecId=null,busy=false,me=null,activeSpace='',members=[];
 const selectedSpace=()=>me?.spaces?.find(s=>s.id===activeSpace);
 const canWrite=()=>!activeSpace||selectedSpace()?.role!=='viewer';
-const scopedPath=path=>activeSpace&&/^\/(?:state|transactions|budgets|recurring|planned|favorites)(?:\/|$|\?)/.test(path)?path+(path.includes('?')?'&':'?')+'spaceId='+encodeURIComponent(activeSpace):path;
+const scopedPath=path=>activeSpace&&/^\/(?:state|transactions|budgets|recurring|planned|favorites|fund|insights|capital)(?:\/|$|\?)/.test(path)?path+(path.includes('?')?'&':'?')+'spaceId='+encodeURIComponent(activeSpace):path;
 month.setDate(1);
 function error(msg){$('errorBanner').textContent=msg;$('errorBanner').classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});}
 function clearError(){$('errorBanner').classList.add('hidden');}
@@ -24,12 +25,12 @@ async function login(){const verifier=base64url(crypto.getRandomValues(new Uint8
 async function handleCallback(){const q=new URLSearchParams(location.search);if(q.has('error'))throw Error('Cognito: '+(q.get('error_description')||q.get('error')));if(!q.has('code'))return;const verifier=sessionStorage.getItem('moneta-pkce');const saved=sessionStorage.getItem('moneta-state');sessionStorage.removeItem('moneta-pkce');sessionStorage.removeItem('moneta-state');const code=q.get('code');const valid=Boolean(verifier&&saved&&saved===q.get('state'));history.replaceState({},'',location.pathname);if(!valid)throw Error('Stato di autenticazione non valido.');const body=new URLSearchParams({grant_type:'authorization_code',client_id:config.clientId,code,code_verifier:verifier,redirect_uri:callbackUrl()});const r=await fetch(config.cognitoUrl+'/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const data=await r.json();if(!r.ok||!data.access_token)throw Error('Login fallito: '+(data.error||r.status));token=data.access_token;sessionStorage.setItem('moneta-token',token);}
 function logout(){sessionStorage.removeItem('moneta-token');token=null;location.assign(config.cognitoUrl+'/logout?'+new URLSearchParams({client_id:config.clientId,logout_uri:callbackUrl()}));}
 async function api(path,method='GET',obj){if(!token||jwtExpired(token)){sessionStorage.removeItem('moneta-token');throw Error('Sessione scaduta. Effettua nuovamente il login.');}const r=await fetch(config.apiUrl+scopedPath(path),{method,headers:{Authorization:'Bearer '+token,...(obj===undefined?{}:{'Content-Type':'application/json'})},body:obj===undefined?undefined:JSON.stringify(obj),cache:'no-store'});if(r.status===204)return null;const data=await r.json().catch(()=>({}));if(!r.ok)throw Error(data.error||'Errore API '+r.status);return data;}
-async function reload(){clearError();const scope=activeSpace;try{const [data,favs]=await Promise.all([api('/state'),api('/favorites')]);if(scope!==activeSpace)return;state={transactions:Array.isArray(data.transactions)?data.transactions:[],budgets:{...DEFAULT_BUDGETS,...data.budgets},recurring:Array.isArray(data.recurring)?data.recurring:[],planned:Array.isArray(data.planned)?data.planned:[]};favorites=Array.isArray(favs.favorites)?favs.favorites:[];render();}catch(e){error(e.message);}}
-function navigate(target){if(target==='costs'&&!me?.isAdmin){error('Accesso ai costi AWS riservato agli amministratori');return;}view=target;document.querySelectorAll('.view').forEach(el=>el.classList.toggle('hidden',el.id!=='view-'+target));document.querySelectorAll('.nav-btn').forEach(el=>el.classList.toggle('active',el.dataset.view===target));$('topSection').textContent={home:'Panoramica',movements:'Movimenti',recurring:'Ricorrenze',costs:'Costi AWS',spaces:'Bilanci condivisi',settings:'Budget e dati',calendar:'Scadenze'}[target];window.scrollTo({top:0});if(target==='costs'&&costs)renderCosts();if(target==='spaces')renderSpaces();if(target==='calendar')renderCalendar();if($('mobileMoreMenu'))$('mobileMoreMenu').classList.add('hidden');document.querySelectorAll('[data-mobile-view]').forEach(el=>el.classList.toggle('active',el.dataset.mobileView===target));}
-const sum=(list,type)=>list.filter(t=>t.type===type&&(activeSpace||t.affectsBalance!==false)).reduce((a,x)=>a+Math.round(Number(x.amount)*100),0)/100;
+async function reload(){clearError();const scope=activeSpace;try{const [data,favs]=await Promise.all([api('/state'),api('/favorites')]);if(scope!==activeSpace)return;state={transactions:Array.isArray(data.transactions)?data.transactions:[],budgets:{...DEFAULT_BUDGETS,...data.budgets},recurring:Array.isArray(data.recurring)?data.recurring:[],planned:Array.isArray(data.planned)?data.planned:[]};favorites=Array.isArray(favs.favorites)?favs.favorites:[];render();if(view==='fund'&&activeSpace)await loadFund();if(view==='insights'&&!activeSpace)await loadInsights();}catch(e){error(e.message);}}
+function navigate(target){if(target==='fund'&&!activeSpace){error('Per il Fondo comune seleziona prima un bilancio condiviso.');target='spaces';}if(target==='insights'&&activeSpace){error('Per gli Insights personali seleziona Il mio bilancio.');target='home';}if(target==='costs'&&!me?.isAdmin){error('Accesso ai costi AWS riservato agli amministratori');return;}view=target;document.querySelectorAll('.view').forEach(el=>el.classList.toggle('hidden',el.id!=='view-'+target));document.querySelectorAll('.nav-btn').forEach(el=>el.classList.toggle('active',el.dataset.view===target));$('topSection').textContent={home:'Panoramica',movements:'Movimenti',recurring:'Ricorrenze',costs:'Costi AWS',spaces:'Bilanci condivisi',settings:'Budget e dati',calendar:'Scadenze',fund:'Fondo comune',insights:'Moneta Insights'}[target];window.scrollTo({top:0});if(target==='costs'&&costs)renderCosts();if(target==='spaces')renderSpaces();if(target==='calendar')renderCalendar();if(target==='fund')loadFund();if(target==='insights')loadInsights();if($('mobileMoreMenu'))$('mobileMoreMenu').classList.add('hidden');document.querySelectorAll('[data-mobile-view]').forEach(el=>el.classList.toggle('active',el.dataset.mobileView===target));}
+const sum=(list,type)=>list.filter(t=>t.type===type&&!t.isTransfer&&!t.isCorrection&&!t.isReversed&&(activeSpace||t.affectsBalance!==false)).reduce((a,x)=>a+Math.round(Number(x.amount)*100),0)/100;
 function balance(list){return Math.round(list.reduce((acc,t)=>acc+(t.affectsBalance===false?0:(t.type==='income'?1:-1)*Math.round(Number(t.amount)*100)),0))/100;}
 const txSort=(a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id);
-function table(items,actions=false){if(!items.length)return '<div class="empty">Nessun movimento presente.</div>';return `<table class="data-table"><thead><tr><th>DESCRIZIONE</th><th>CATEGORIA</th><th>DATA</th><th class="right">IMPORTO</th>${actions?'<th class="right">AZIONI</th>':''}</tr></thead><tbody>${items.map(t=>`<tr><td><strong>${html(t.description)}</strong>${t.recurringId?'<div class="muted">↻ Ricorrente</div>':''}${t.linkedSpaceId?'<div class="muted">♧ Collegato a un bilancio condiviso'+(t.affectsBalance===false?' · nessun addebito personale':'')+'</div>':''}${activeSpace&&t.paymentSource==='personal'?'<div class="muted">Pagato con denaro personale</div>':''}</td><td><span class="pill">${html(t.category)}</span></td><td class="date-text">${html(dateName(t.date))}</td><td class="right ${t.type==='income'?'positive':'negative'}"><strong>${t.type==='income'?'+':'−'}${money(t.amount)}</strong></td>${actions?`<td class="right">${!t.readOnly&&canWrite()?`<button class="table-action" data-fav-tx="${html(t.id)}" title="Aggiungi ai preferiti">☆</button><button class="table-action" data-edit="${html(t.id)}">Modifica</button><button class="table-action danger" data-delete="${html(t.id)}">Elimina</button>`:'<span class="muted">Solo lettura</span>'}</td>`:''}</tr>`).join('')}</tbody></table>`;}
+function table(items,actions=false){if(!items.length)return '<div class="empty">Nessun movimento presente.</div>';return `<table class="data-table"><thead><tr><th>DESCRIZIONE</th><th>CATEGORIA</th><th>DATA</th><th class="right">IMPORTO</th>${actions?'<th class="right">AZIONI</th>':''}</tr></thead><tbody>${items.map(t=>`<tr><td><strong>${html(t.description)}</strong>${t.recurringId?'<div class="muted">↻ Ricorrente</div>':''}${t.isTransfer?'<div class="muted">⇄ Trasferimento · escluso da entrate e spese</div>':''}${t.isCorrection?'<div class="muted">↶ Storno tracciato · escluso dalle statistiche</div>':''}${t.isReversed?'<div class="muted">Stornato · escluso dalle statistiche</div>':''}${t.linkedSpaceId?'<div class="muted">♧ Collegato a un bilancio condiviso'+(t.affectsBalance===false?' · nessun addebito personale':'')+'</div>':''}${activeSpace&&t.paymentSource==='personal'?'<div class="muted">Pagato con denaro personale</div>':''}</td><td><span class="pill">${html(t.category)}</span></td><td class="date-text">${html(dateName(t.date))}</td><td class="right ${t.type==='income'?'positive':'negative'}"><strong>${t.type==='income'?'+':'−'}${money(t.amount)}</strong></td>${actions?`<td class="right">${!t.readOnly&&!t.ledgerOperationId&&canWrite()?`<button class="table-action" data-fav-tx="${html(t.id)}" title="Aggiungi ai preferiti">☆</button><button class="table-action" data-edit="${html(t.id)}">Modifica</button><button class="table-action danger" data-delete="${html(t.id)}">Elimina</button>`:'<span class="muted">Solo lettura</span>'}</td>`:''}</tr>`).join('')}</tbody></table>`;}
 function chartSvg(series,labels,{colors=['#55e8bb'],currency='EUR',includeZero=false}={}){
  const W=670,H=245,L=58,R=20,T=20,B=42;
  const values=series.flatMap(s=>s);let max=Math.max(...values,0),min=Math.min(...values,0);
@@ -71,7 +72,7 @@ function renderWorkspacePicker(){
  const option=(id,name,subtitle,icon)=>`<button type="button" class="workspace-option ${activeSpace===id?'selected':''}" role="menuitemradio" aria-checked="${activeSpace===id}" data-pick-space="${html(id)}"><span class="workspace-option-icon">${icon}</span><span class="workspace-option-text"><strong>${html(name)}</strong><small>${html(subtitle)}</small></span>${activeSpace===id?'<span class="workspace-check">✓</span>':''}</button>`;
  $('workspaceOptions').innerHTML=option('','Il mio bilancio','Privato · Solo tu','♙')+(me?.spaces||[]).map(s=>option(s.id,s.name,s.role==='owner'?'Condiviso · Proprietario':s.role==='viewer'?'Condiviso · Lettura':'Condiviso · Membro','⌂')).join('');
 }
-async function selectWorkspace(value){closeWorkspaceMenu();activeSpace=value||'';renderWorkspacePicker();state={transactions:[],budgets:{},recurring:[],planned:[]};favorites=[];costs=null;await reload();if(view==='spaces')await renderSpaces();}
+async function selectWorkspace(value){closeWorkspaceMenu();activeSpace=value||'';fundData=null;fundMembers=[];insightsData=null;if(view==='fund'&&!activeSpace||view==='insights'&&activeSpace)navigate('home');renderWorkspacePicker();state={transactions:[],budgets:{},recurring:[],planned:[]};favorites=[];costs=null;await reload();if(view==='spaces')await renderSpaces();}
 async function renderSpaces(){if(!me)return;
  $('spaceList').innerHTML=(me.spaces||[]).length?me.spaces.map(s=>`<div class="service"><span><strong>${html(s.name)}</strong><span class="muted"> · ${html(s.role)}</span></span><button class="btn btn-soft space-action" data-space="${html(s.id)}">Apri</button></div>`).join(''):'<div class="empty">Non hai ancora bilanci condivisi.</div>';
  $('inviteList').innerHTML=(me.invites||[]).length?me.invites.map(inv=>`<div class="service"><span><strong>${html(inv.spaceName)}</strong><span class="muted"> · ${html(inv.role)}</span></span><span><button class="btn btn-soft" data-accept="${html(inv.id)}">Accetta</button> <button class="btn btn-soft" data-decline="${html(inv.id)}">Rifiuta</button></span></div>`).join(''):'<div class="empty">Non ci sono inviti in attesa.</div>';
@@ -249,12 +250,229 @@ async function handleCalendarClick(e){
  const del=e.target.closest('[data-plan-delete]');
  if(del&&confirm('Eliminare questa scadenza? Il saldo e i movimenti esistenti non cambieranno.'))await mutate(()=>api('/planned/'+encodeURIComponent(del.dataset.planDelete),'DELETE'));
 }
+// Moneta 2.2: letture separate per fondo condiviso e patrimonio privato.
+const fundName=id=>id===me?.userId?'Tu':(fundMembers.find(m=>m.id===id)?.email||id.slice(0,8)+'…');
+const amountCents=n=>Math.round(Number(n)*100);
+async function loadFund(){
+ if(!activeSpace){$('fundNeedsSpace').classList.remove('hidden');$('fundContents').classList.add('hidden');return;}
+ const scope=activeSpace;
+ try{
+  const [fund,people]=await Promise.all([api('/fund'),api('/spaces/'+encodeURIComponent(scope)+'/members')]);
+  if(activeSpace!==scope)return;
+  fundData=fund;fundMembers=people.members||[];
+  $('fundNeedsSpace').classList.add('hidden');$('fundContents').classList.remove('hidden');renderFund();
+ }catch(e){error(e.message);}
+}
+function renderFund(){
+ if(!fundData)return;
+ $('fundBalance').textContent=money(fundData.balance);
+ $('fundContributions').innerHTML=fundData.contributions.length?fundData.contributions.map(c=>`<div class="fund-row"><span>${html(fundName(c.userId))}</span><strong class="positive">${money(c.amount)}</strong></div>`).join(''):'<p class="empty">Nessun nuovo versamento registrato.</p>';
+ $('fundAdvanceList').innerHTML=fundData.advances.length?fundData.advances.map(a=>{
+  const outstanding=Object.entries(a.outstanding||{}).filter(([,val])=>val>0);
+  const status=outstanding.length?outstanding.map(([who,v])=>`${html(who==='fund'?'Fondo':fundName(who))}: ${money(v)}`).join(' · '):'Nessun credito residuo';
+  return `<div class="fund-entry ${a.isReversed?'is-reversed':''}"><strong>${html(a.description)}</strong><span class="muted">${html(dateName(a.date))} · Anticipato da ${html(fundName(a.payerId))}</span><span>${money(a.amount)} · <span class="${outstanding.length?'negative':'positive'}">${a.isReversed?'Operazione stornata':status}</span></span></div>`;
+ }).join(''):'<p class="empty">Nessun anticipo registrato.</p>';
+ const titles={contribution:'Versamento',advance:'Anticipo',reimbursement:'Rimborso',reversal:'Storno'};
+ $('fundOperations').innerHTML=fundData.operations.length?fundData.operations.map(o=>{
+  const canReverse=!o.isReversed&&o.kind!=='reversal'&&canWrite()&&(o.createdBy===me?.userId||selectedSpace()?.role==='owner');
+  return `<div class="fund-entry ${o.isReversed?'is-reversed':''}"><strong>${html(titles[o.kind]||o.kind)} · ${html(o.description)}</strong><span class="muted">${html(dateName(o.date))} · ${html(fundName(o.createdBy))}${o.isReversed?' · STORNATO':''}${o.kind==='reversal'?' · Rettifica di '+html(o.reverses):''}</span><strong>${money(o.amount)}</strong>${o.reason?`<span class="muted">Motivo: ${html(o.reason)}</span>`:''}${canReverse?`<button type="button" class="btn btn-soft btn-small fund-ledger-action" data-reverse-op="${html(o.id)}">↶ Storna questa operazione</button>`:''}</div>`;
+ }).join(''):'<p class="empty">Nessuna operazione avanzata.</p>';
+ $('fundSubmit').disabled=!canWrite();
+ const currentMembers=new Set(fundMembers.map(m=>m.id));
+ const saved=Object.fromEntries([...document.querySelectorAll('[data-fund-member]')].map(el=>[el.dataset.fundMember,el.value]));
+ $('fundAllocationRows').innerHTML=fundMembers.map(m=>`<label class="fund-portion"><span>${html(fundName(m.id))}</span><input type="number" class="input" data-fund-member="${html(m.id)}" min="0" max="1000000" step="0.01" inputmode="decimal" value="${html(currentMembers.has(m.id)?(saved[m.id]||'0'):'0')}"></label>`).join('');
+ fundEqualSplit();updateFundFields();
+}
+function fundEqualSplit(){
+ const fields=[...document.querySelectorAll('[data-fund-member]')];
+ const amount=amountCents($('fundAmount').value);
+ if(!fields.length||!Number.isSafeInteger(amount)||amount<0)return;
+ const each=Math.floor(amount/fields.length),remainder=amount%fields.length;
+ fields.forEach((field,i)=>field.value=((each+(i<remainder?1:0))/100).toFixed(2));
+ updateAllocationStatus();
+}
+function updateAllocationStatus(){
+ const values=[...document.querySelectorAll('[data-fund-member]')].map(el=>amountCents(el.value));
+ const total=values.reduce((a,b)=>a+b,0),target=amountCents($('fundAmount').value);
+ $('fundAllocationStatus').textContent=`Quote assegnate: ${money(total/100)} di ${money(target/100)}${total===target?' ✓':' · Verifica gli importi prima di salvare'}`;
+ $('fundAllocationStatus').classList.toggle('negative',total!==target);
+}
+function openReimbursementChoices(){
+ const old=$('fundAdvanceSelect').value;
+ const claims=(fundData?.advances||[]).filter(a=>!a.isReversed&&Object.values(a.outstanding||{}).some(x=>x>0));
+ $('fundAdvanceSelect').innerHTML=claims.map(a=>`<option value="${html(a.id)}">${html(a.description)} · ${money(a.amount)}</option>`).join('');
+ if(claims.some(a=>a.id===old))$('fundAdvanceSelect').value=old;
+ const claim=claims.find(a=>a.id===$('fundAdvanceSelect').value), selected=$('fundDebtorSelect').value;
+ $('fundDebtorSelect').innerHTML=claim?Object.entries(claim.outstanding).filter(([,v])=>v>0).map(([id,v])=>`<option value="${html(id)}">${html(id==='fund'?'Fondo comune':fundName(id))} · residuo ${money(v)}</option>`).join(''):'';
+ if(claim?.outstanding[selected]>0)$('fundDebtorSelect').value=selected;
+ $('fundSubmit').disabled=!canWrite()||!claims.length;
+}
+function updateFundFields(){
+ const kind=$('fundKind').value;
+ $('fundAdvanceFields').classList.toggle('hidden',kind!=='advance');
+ $('fundReimbursementFields').classList.toggle('hidden',kind!=='reimbursement');
+ $('fundOperationHint').textContent={contribution:'Il denaro passa dal tuo bilancio al fondo: non è un costo familiare.',advance:'La spesa viene attribuita al bilancio condiviso ma pagata da te. Indica chi ne sostiene il costo e come regolare il pagamento.',reimbursement:'Registra solo un rimborso già avvenuto. Il credito residuo si riduce senza creare una nuova spesa.'}[kind];
+ if(kind==='reimbursement')openReimbursementChoices();
+ else $('fundSubmit').disabled=!canWrite();
+}
+async function saveFundOperation(e){
+ e.preventDefault();if(!activeSpace||busy||!canWrite())return;
+ const kind=$('fundKind').value;
+ const payload={id:'op-'+crypto.randomUUID(),kind,description:$('fundDescription').value.trim(),amount:Number($('fundAmount').value),date:$('fundDate').value};
+ if(kind==='advance'){
+  payload.category=$('fundCategory').value;payload.settlementMode=$('fundSettlementMode').value;
+  payload.allocations=Object.fromEntries([...document.querySelectorAll('[data-fund-member]')].map(el=>[el.dataset.fundMember,Number(el.value)]));
+  if(Object.values(payload.allocations).reduce((a,b)=>a+amountCents(b),0)!==amountCents(payload.amount)){error('La somma delle quote deve coincidere con il totale.');return;}
+ }else if(kind==='reimbursement'){
+  payload.advanceId=$('fundAdvanceSelect').value;payload.debtorId=$('fundDebtorSelect').value;
+  const claim=fundData?.advances?.find(a=>a.id===payload.advanceId);
+  if(!claim||Number(claim.outstanding[payload.debtorId])<payload.amount){error('Rimborso maggiore del credito aperto.');return;}
+ }
+ busy=true;clearError();$('fundSubmit').disabled=true;
+ try{
+  await api('/fund/operations','POST',payload);
+  $('fundDescription').value='';$('fundAmount').value='';
+  await reload();await loadFund();
+ }catch(err){error(err.message);}finally{busy=false;updateFundFields();}
+}
+async function loadInsights(){
+ if(activeSpace){$('insightsContents').classList.add('hidden');$('insightsNeedsPersonal').classList.remove('hidden');return;}
+ try{const result=await api('/insights');if(activeSpace)return;insightsData=result;$('insightsContents').classList.remove('hidden');$('insightsNeedsPersonal').classList.add('hidden');renderInsights();}catch(e){error(e.message);}
+}
+function renderInsights(){
+ if(!insightsData)return;const data=insightsData;
+ $('insightNet').textContent=money(data.netWorth);$('insightCash').textContent=money(data.liquidity);$('insightInvestment').textContent=money(data.totals.investment||0);
+ $('insightNotices').innerHTML=(data.notices||[]).map(n=>`<div class="insight-advice ${n.type==='warning'?'warning':''}"><strong>${n.type==='warning'?'⚠️':'✦'} ${html(n.title)}</strong><p>${html(n.description)}</p></div>`).join('')||'<p class="empty">Nessuna segnalazione in questo momento.</p>';
+ $('insightMonthly').innerHTML=(data.lastThreeMonths||[]).map(n=>`<div class="fund-entry"><strong>${html(n.month)}</strong><span class="positive">Entrate ${money(n.income)}</span><span>Spese ${money(n.expenses)} · Saldo ${money(n.saved)}</span></div>`).join('');
+ $('capitalRows').innerHTML=data.assets.length?data.assets.map(a=>`<div class="fund-row"><div class="fund-entry"><strong>${html(a.name)}</strong><span class="muted">${html(({investment:'Investimento',other:'Altro bene o credito',debt:'Debito',cash_outside_ledger:'Liquidità esterna'})[a.kind]||a.kind)} · al ${html(dateName(a.asOf))}</span><strong>${money(a.amount)}</strong></div><div class="portfolio-actions"><button type="button" class="table-action" data-edit-capital="${html(a.id)}">Modifica</button><button type="button" class="table-action danger" data-delete-capital="${html(a.id)}">Elimina</button></div></div>`).join(''):'<p class="empty">Non ci sono ancora attività o passività aggiuntive.</p>';
+ renderPortfolio(data);
+}
+function renderPortfolio(data){
+ const portfolio=data.portfolio||[];
+ const valued=portfolio.filter(p=>Number(p.value)>0).sort((a,b)=>b.value-a.value);
+ const known=valued.filter(p=>p.unrealizedGain!==null&&p.unrealizedGain!==undefined);
+ const knownCost=known.reduce((n,p)=>n+(p.value-p.unrealizedGain),0);
+ const knownGain=known.reduce((n,p)=>n+p.unrealizedGain,0);
+ $('portfolioSummary').innerHTML=`<div class="portfolio-kpi"><span>Totale investimenti</span><strong>${money(data.totals.investment||0)}</strong></div><div class="portfolio-kpi"><span>Posizioni registrate</span><strong>${portfolio.length}</strong></div><div class="portfolio-kpi"><span>Plus/minusvalenza documentata</span><strong class="${knownGain<0?'negative':'positive'}">${known.length?money(knownGain):'—'}</strong></div>`;
+ $('portfolioRows').innerHTML=valued.length?valued.map(p=>`<div class="portfolio-entry"><div class="fund-row"><strong>${html(p.name)}</strong><strong>${money(p.value)}</strong></div><div class="portfolio-track" aria-label="Peso ${html(p.weightPercent)} percento"><span style="width:${Math.min(100,Math.max(0,p.weightPercent))}%"></span></div><div class="portfolio-meta"><span>Peso ${html(p.weightPercent)}%</span><span>${html(p.assetClass||'altro')}</span>${p.unrealizedGain!==null&&p.unrealizedGain!==undefined?`<span class="${p.unrealizedGain<0?'negative':'positive'}">Variazione ${money(p.unrealizedGain)} (${html(p.gainPct)}%)</span>`:''}<span>Valutato ${html(dateName(p.asOf))}${p.daysSinceValuation>30?' · da aggiornare':''}</span></div></div>`).join(''):'<p class="empty">Aggiungi un investimento per vedere la composizione del portafoglio.</p>';
+ if(!knownCost&&known.length)$('portfolioSummary').title='Costo di acquisto non disponibile per alcune posizioni.';
+}
+function updateCapitalFields(){
+ const investment=$('capitalKind').value==='investment';
+ $('capitalInvestmentFields').classList.toggle('hidden',!investment);
+}
+function recalcCapitalValue(){
+ if($('capitalKind').value!=='investment')return;
+ const qty=Number($('capitalQuantity').value),price=Number($('capitalUnitPrice').value);
+ if($('capitalQuantity').value&&$('capitalUnitPrice').value&&Number.isFinite(qty)&&Number.isFinite(price)&&qty>0&&price>=0){
+  $('capitalValue').value=(Math.round(qty*price*100)/100).toFixed(2);
+ }
+}
+function resetCapitalEdit(){
+ capitalEditId=null;$('capitalForm').reset();$('capitalAsOf').value=localDay();
+ $('capitalSave').textContent='Aggiungi al patrimonio';$('capitalCancelEdit').classList.add('hidden');
+ updateCapitalFields();
+}
+function editCapital(id){
+ const item=insightsData?.assets?.find(a=>a.id===id);
+ if(!item)return;
+ capitalEditId=id;
+ $('capitalName').value=item.name;$('capitalKind').value=item.kind;$('capitalValue').value=item.amount;
+ $('capitalAsOf').value=item.asOf;
+ $('capitalAssetClass').value=item.assetClass||'other';$('capitalSymbol').value=item.symbol||'';
+ $('capitalQuantity').value=item.quantity||'';$('capitalUnitPrice').value=item.unitPrice||'';
+ $('capitalCostBasis').value=item.costBasis??'';$('capitalFees').value=item.feesPaid??'';
+ $('capitalSave').textContent='Aggiorna elemento';$('capitalCancelEdit').classList.remove('hidden');
+ updateCapitalFields();$('capitalForm').scrollIntoView({behavior:'smooth',block:'center'});
+}
+async function saveCapital(e){
+ e.preventDefault();if(busy||activeSpace)return;
+ const old=insightsData?.assets?.find(a=>a.id===capitalEditId);
+ const data={id:capitalEditId||'asset-'+crypto.randomUUID(),kind:$('capitalKind').value,
+   name:$('capitalName').value.trim(),value:Number($('capitalValue').value),asOf:$('capitalAsOf').value};
+ if(data.kind==='investment'){
+  data.assetClass=$('capitalAssetClass').value;data.symbol=$('capitalSymbol').value.trim();
+  const qty=$('capitalQuantity').value,price=$('capitalUnitPrice').value;
+  if(Boolean(qty)!==Boolean(price)){error('Inserisci sia quantità sia prezzo unitario, oppure lasciali entrambi vuoti.');return;}
+  if(qty&&price){data.quantity=qty;data.unitPrice=price;}
+  if($('capitalCostBasis').value)data.costBasis=$('capitalCostBasis').value;
+  if($('capitalFees').value)data.feesPaid=$('capitalFees').value;
+ }
+ if(old)data.revision=old.revision||1;
+ busy=true;clearError();$('capitalSave').disabled=true;
+ try{
+  await api(old?'/capital/items/'+encodeURIComponent(old.id):'/capital/items',old?'PUT':'POST',data);
+  resetCapitalEdit();await loadInsights();
+ }catch(err){error(err.message);}finally{busy=false;$('capitalSave').disabled=false;}
+}
+function beginReversal(id){
+ if(!fundData||!activeSpace||!canWrite())return;
+ const op=fundData.operations.find(x=>x.id===id);
+ if(!op||op.kind==='reversal'||op.isReversed)return;
+ reverseOperationId=id;$('reverseReason').value='';
+ $('reverseSummary').textContent=`${op.description} · ${money(op.amount)} · ${dateName(op.date)}. Conserviamo la registrazione originale e creiamo movimenti di storno. Per un anticipo con rimborsi già eseguiti, storna prima i rimborsi.`;
+ $('reverseDialog').showModal();
+}
+async function saveReversal(e){
+ e.preventDefault();if(!reverseOperationId||busy)return;
+ const reason=$('reverseReason').value.trim();
+ if(reason.length<8){error('Descrivi il motivo dello storno, minimo 8 caratteri.');return;}
+ busy=true;clearError();
+ try{
+  await api('/fund/operations/'+encodeURIComponent(reverseOperationId)+'/reverse','POST',{reason});
+  $('reverseDialog').close();reverseOperationId=null;await reload();await loadFund();
+ }catch(err){error(err.message);}finally{busy=false;}
+}
+async function simulateFinancials(e){
+ e.preventDefault();if(activeSpace||busy)return;
+ const req={months:Number($('simMonths').value),monthlyReserve:Number($('simReserve').value),
+   extraExpenses:Number($('simExtra').value),incomeReduction:Number($('simReduce').value),
+   oneTimeExpense:Number($('simOnce').value)};
+ busy=true;clearError();$('simulationResult').textContent='Calcolo in corso…';
+ try{
+  const data=await api('/insights/simulate','POST',req);
+  const last=data.projection.at(-1);
+  $('simulationResult').innerHTML=`<div class="portfolio-summary"><div class="portfolio-kpi"><span>Liquidità finale stimata</span><strong class="${last.available<0?'negative':''}">${money(last.available)}</strong></div><div class="portfolio-kpi"><span>Riserva accumulata</span><strong>${money(last.reserved)}</strong></div><div class="portfolio-kpi"><span>Scenario senza variazioni</span><strong>${money(last.baseline)}</strong></div></div>
+  <div class="scenario-legend"><span>Entrate medie: ${money(data.monthlyIncomeEstimate)}/mese</span><span>Spese medie: ${money(data.monthlyExpenseEstimate)}/mese</span><span>Campione: ${data.monthsWithData}/3 mesi con movimenti</span></div>
+  ${(data.warnings||[]).map(w=>`<p class="tip scenario-warning">⚠ ${html(w)}</p>`).join('')}
+  <div class="simulation-scroll"><table class="simulation-table"><thead><tr><th>Mese</th><th>Base</th><th>Liquidità scenario</th><th>Riserva</th><th>Totale disponibile + riserva</th></tr></thead><tbody>${data.projection.map(p=>`<tr><td>${html(p.month)}</td><td>${money(p.baseline)}</td><td class="${p.available<0?'negative':''}">${money(p.available)}</td><td>${money(p.reserved)}</td><td>${money(p.combined)}</td></tr>`).join('')}</tbody></table></div>
+  <div class="tip">${data.assumptions.map(x=>html(x)).join(' · ')}</div>`;
+ }catch(err){error(err.message);$('simulationResult').textContent='Calcolo non disponibile.';}finally{busy=false;}
+}
+
 function initPwa(){
  if(!('serviceWorker' in navigator)||!window.isSecureContext)return;
  window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(()=>{}));
 }
 
 function bind(){
+ $('fundDate').value=localDay();$('capitalAsOf').value=localDay();
+ $('fundKind').onchange=updateFundFields;
+ $('fundAmount').addEventListener('input',()=>{if($('fundKind').value==='advance')fundEqualSplit();});
+ $('fundEqualSplit').onclick=fundEqualSplit;
+ $('fundAllocationRows').addEventListener('input',updateAllocationStatus);
+ $('fundAdvanceSelect').onchange=openReimbursementChoices;
+ $('fundOperationForm').onsubmit=saveFundOperation;
+ $('capitalForm').onsubmit=saveCapital;
+ $('capitalKind').onchange=updateCapitalFields;
+ $('capitalQuantity').addEventListener('input',recalcCapitalValue);
+ $('capitalUnitPrice').addEventListener('input',recalcCapitalValue);
+ $('capitalCancelEdit').onclick=resetCapitalEdit;
+ $('simulateForm').onsubmit=simulateFinancials;
+ $('fundOperations').addEventListener('click',e=>{const b=e.target.closest('[data-reverse-op]');if(b)beginReversal(b.dataset.reverseOp);});
+ $('reverseForm').onsubmit=saveReversal;
+ $('reverseClose').onclick=$('reverseCancel').onclick=()=>{$('reverseDialog').close();reverseOperationId=null;};
+ $('reverseDialog').addEventListener('close',()=>{reverseOperationId=null;});
+ updateCapitalFields();
+ $('capitalRows').addEventListener('click',e=>{
+  const a=e.target.closest('[data-edit-capital]'),b=e.target.closest('[data-delete-capital]');
+  if(a){editCapital(a.dataset.editCapital);return;}
+  if(b&&confirm('Eliminare questo elemento dal patrimonio?'))mutate(async()=>{
+    await api('/capital/items/'+encodeURIComponent(b.dataset.deleteCapital),'DELETE');
+    if(capitalEditId===b.dataset.deleteCapital)resetCapitalEdit();
+    await loadInsights();
+  });
+ });
  $('openQuickButton').onclick=()=>openQuick();$('mobileQuick').onclick=()=>openQuick();
  $('closeQuick').onclick=()=>$('quickDialog').close();
  $('quickForm').onsubmit=e=>{e.preventDefault();saveQuick(false);};

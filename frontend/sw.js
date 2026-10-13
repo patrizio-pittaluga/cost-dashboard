@@ -1,6 +1,6 @@
 /* Moneta 2.1: soltanto asset statici pubblici in cache. Nessuna API o sessione. */
 'use strict';
-const CACHE = 'moneta-static-v2.1.0';
+const CACHE = 'moneta-static-v2.2.1';
 const STATIC = new Set(['/','/index.html','/app.js','/styles.css','/manifest.webmanifest','/icons/moneta-192.png','/icons/moneta-512.png']);
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll([...STATIC])).then(() => self.skipWaiting()));

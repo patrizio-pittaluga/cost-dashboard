@@ -12,6 +12,7 @@ import os
 import re
 import time
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 import boto3
 from botocore.exceptions import ClientError
@@ -120,6 +121,15 @@ def validate_rule(obj, expected_id=None):
 def public(row):
     val = dict(row)
     val['amount'] = int(val.pop('amountCents')) / 100
+    # Le contribuzioni legacy (prima della 2.2) erano già trasferimenti,
+    # ma non avevano un flag esplicito. Inferenza conservativa dalla struttura.
+    if (val.get('type') == 'income' and val.get('paymentSource') == 'personal'
+            and val.get('createdBy')):
+        val['isTransfer'] = True
+    if (val.get('linkedSpaceId') and val.get('sourceTransactionId')
+            and val.get('type') == 'expense'
+            and str(val.get('description','')).startswith('Versamento al fondo · ')):
+        val['isTransfer'] = True
     return val
 
 def query_user(pk):
@@ -404,6 +414,8 @@ def transaction_actions(space_id, actor, record, method):
         raise BadRequest('ID movimento già esistente')
     if method == 'update' and (not previous or previous.get('skipped')):
         raise KeyError('Movimento non trovato')
+    if method == 'update' and (previous.get('value') or {}).get('ledgerOperationId'):
+        raise BadRequest('Operazione del fondo non modificabile; crea una rettifica tracciata')
     owner_id = (previous or {}).get('value', {}).get('createdBy', actor)
     if method == 'update' and (previous.get('value') or {}).get('recurringId'):
         record['recurringId'] = previous['value']['recurringId']
@@ -437,6 +449,8 @@ def delete_shared_transaction(space_id, sub, rid):
     if row.get('skipped'):
         return
     original = row.get('value') or {}
+    if original.get('ledgerOperationId'):
+        raise BadRequest('Operazione del fondo non eliminabile come movimento ordinario')
     actions = [auth_check(space_id,sub)]
     if original.get('recurringId'):
         actions.append(put_action({'PK':pk,'SK':'TX#'+rid,'skipped':True}, 'attribute_exists(PK)'))
@@ -639,18 +653,553 @@ def complete_planned(data_pk, space_id, sub, ident, paid_date):
     return {'completed':True,'transactionId':txid}
 
 
+# --- Moneta 2.2: fondo avanzato, scritture immutabili e Insights personali ---
+FUND_OPERATION_LIMIT = 5000
+CAPITAL_ITEM_LIMIT = 120
+
+def safe_id(value):
+    if not isinstance(value, str) or not ID_RE.fullmatch(value) or len(value) > 72:
+        raise BadRequest('Identificativo operazione non valido')
+    return value
+
+
+def positive_amount(value):
+    return cents(value)
+
+
+def ledger_transaction(txid, description, category, kind, amount, date, opid, **extra):
+    return {'id':txid,'description':description,'type':kind,'category':category,
+            'date':date,'amountCents':amount,'note':'',
+            'ledgerOperationId':opid, **extra}
+
+
+def read_fund(space_id, sub):
+    membership(space_id, sub)
+    pk = space_key(space_id)
+    today=dt.datetime.now(ZoneInfo('Europe/Rome')).date().isoformat()
+    tx_rows = [tx for tx in state_for(pk)['transactions'] if tx['date']<=today]
+    balance_cents = sum(round(Decimal(str(t['amount']))*100)*(1 if t['type']=='income' else -1)
+                        for t in tx_rows if t.get('affectsBalance',True))
+    operations = [r['value'] for r in list_prefix(pk,'LEDGER#')]
+    reversed_ids = {r['SK'][4:] for r in list_prefix(pk,'REV#')}
+    advances = [r['value'] for r in list_prefix(pk,'ADV#')]
+    contributions = {}
+    for op in operations:
+        if op['kind'] == 'contribution' and op['id'] not in reversed_ids:
+            who = op['createdBy']
+            contributions[who] = contributions.get(who,0)+int(op['amountCents'])
+    return {'balance':balance_cents/100,
+            'contributions':[{'userId':who,'amount':amount/100} for who,amount in sorted(contributions.items())],
+            'operations':[public({**op,'isReversed':op['id'] in reversed_ids}) for op in sorted(operations,key=lambda r:(r['date'],r['id']),reverse=True)[:100]],
+            'advances':[{'id':a['id'],'description':a['description'],'date':a['date'],
+                         'payerId':a['payerId'],'amount':int(a['amountCents'])/100,
+                         'settlementMode':a['settlementMode'],
+                         'allocations':{key:int(val)/100 for key,val in a['allocations'].items()},
+                         'outstanding':{key:int(val)/100 for key,val in a['outstanding'].items()},
+                         'settled':not any(int(x)>0 for x in a['outstanding'].values()),
+                         'isReversed':a['id'] in reversed_ids}
+                        for a in sorted(advances,key=lambda r:r['date'],reverse=True)[:200]],
+            'note':'Il saldo include anche i movimenti preesistenti del bilancio. Le attribuzioni storiche non vengono inventate.'}
+
+
+def member_exists_check(space_id, member_id):
+    return {'ConditionCheck':{'TableName':TABLE.name,
+       'Key':wire({'PK':space_key(space_id),'SK':'MEMBER#'+member_id}),
+       'ConditionExpression':'attribute_exists(PK)'}}
+
+
+def validate_allocation(space_id, allocations, total):
+    if not isinstance(allocations,dict) or not 1 <= len(allocations) <= MEMBERS_LIMIT:
+        raise BadRequest('Inserisci le quote dei membri')
+    parsed = {}
+    for sub,amount in allocations.items():
+        if not isinstance(sub,str) or not re.fullmatch(r'[A-Za-z0-9-]{10,80}',sub):
+            raise BadRequest('ID membro non valido')
+        if not get_row(space_key(space_id),'MEMBER#'+sub):
+            raise BadRequest('La quota appartiene a un utente non membro')
+        parsed[sub]=cents(amount,allow_zero=True)
+    if sum(parsed.values()) != total:
+        raise BadRequest('La somma delle quote deve coincidere con la spesa')
+    return parsed
+
+
+def create_fund_operation(space_id, actor, payload):
+    membership(space_id,actor,write=True)
+    pk=space_key(space_id)
+    opid=safe_id(payload.get('id'))
+    kind=payload.get('kind')
+    if kind not in ('contribution','advance','reimbursement'):
+        raise BadRequest('Operazione del fondo non valida')
+    amount=positive_amount(payload.get('amount'))
+    date=date_value(payload.get('date')).isoformat()
+    if date > dt.datetime.now(ZoneInfo('Europe/Rome')).date().isoformat():
+        raise BadRequest('Le operazioni contabili devono essere già avvenute')
+    stamp=dt.datetime.now(dt.timezone.utc).isoformat()
+    title=payload.get('description','')
+    if not isinstance(title,str) or not 1 <= len(title.strip()) <= 120:
+        raise BadRequest('Descrizione obbligatoria (massimo 120 caratteri)')
+    title=title.strip()
+    if len(list_prefix(pk,'LEDGER#')) >= FUND_OPERATION_LIMIT:
+        raise BadRequest('Limite operazioni raggiunto')
+    op={'id':opid,'kind':kind,'date':date,'description':title,'amountCents':amount,
+        'createdBy':actor,'createdAt':stamp}
+    actions=[auth_check(space_id,actor), put_action({'PK':pk,'SK':'LEDGER#'+opid,'value':op})]
+    txid='fund-'+opid
+    if len(txid)>80:
+        raise BadRequest('ID troppo lungo (massimo 75 caratteri)')
+    if kind=='contribution':
+        family=ledger_transaction(txid,'Versamento · '+title,'Extra','income',amount,date,opid,
+                                  createdBy=actor,paymentSource='personal',affectsBalance=True,
+                                  isTransfer=True)
+        personal=mirrored_transaction(space_id,family)
+        personal.update({'isTransfer':True,'ledgerOperationId':opid,'readOnly':True})
+        actions.extend([put_action({'PK':pk,'SK':'TX#'+txid,'value':family}),
+                        put_action({'PK':user_key(actor),'SK':'TX#'+personal['id'],'value':personal})])
+    elif kind=='advance':
+        category=payload.get('category')
+        if category not in EXPENSE:
+            raise BadRequest('Categoria spesa non valida')
+        allocations=validate_allocation(space_id,payload.get('allocations'),amount)
+        mode=payload.get('settlementMode')
+        if mode not in ('fund','direct','none'):
+            raise BadRequest('Modalità rimborso non valida')
+        outstanding = ({'fund':amount} if mode=='fund' else
+                       {who:value for who,value in allocations.items() if who != actor and value > 0}
+                       if mode=='direct' else {})
+        claim={'id':opid,'description':title,'date':date,'payerId':actor,'amountCents':amount,
+               'allocations':allocations,'outstanding':outstanding,'settlementMode':mode,
+               'version':1,'createdAt':stamp}
+        family=ledger_transaction(txid,title,category,'expense',amount,date,opid,
+                                  createdBy=actor,paymentSource='personal',affectsBalance=False)
+        personal=mirrored_transaction(space_id,family)
+        personal['ledgerOperationId']=opid
+        actions.extend([put_action({'PK':pk,'SK':'ADV#'+opid,'value':claim}),
+                        put_action({'PK':pk,'SK':'TX#'+txid,'value':family}),
+                        put_action({'PK':user_key(actor),'SK':'TX#'+personal['id'],'value':personal})])
+        for member_id in allocations:
+            if member_id != actor:
+                actions.append(member_exists_check(space_id,member_id))
+        op['settlementMode']=mode
+    else:
+        advance_id=safe_id(payload.get('advanceId'))
+        row=get_row(pk,'ADV#'+advance_id)
+        if not row:
+            raise KeyError('Anticipo inesistente')
+        claim=row['value']; mode=claim['settlementMode']
+        if claim.get('reversedAt') or get_row(pk,'REV#'+advance_id):
+            raise BadRequest('Anticipo già stornato')
+        if date < claim['date']:
+            raise BadRequest('Il rimborso non può precedere l’anticipo')
+        payer=claim['payerId']
+        if not get_row(pk,'MEMBER#'+payer):
+            raise BadRequest('Il beneficiario non è più membro del fondo')
+        debtor = 'fund' if mode=='fund' else payload.get('debtorId')
+        if mode=='none' or debtor not in claim['outstanding']:
+            raise BadRequest('Non ci sono rimborsi aperti per questo soggetto')
+        remaining=int(claim['outstanding'][debtor])
+        if remaining < amount:
+            raise BadRequest('Il rimborso supera il credito residuo')
+        if debtor!='fund':
+            if not isinstance(debtor,str) or not get_row(pk,'MEMBER#'+debtor):
+                raise BadRequest('Il debitore non è più membro')
+            if actor != debtor and membership(space_id,actor) != 'owner':
+                raise PermissionError('Solo il debitore o il proprietario può registrare il rimborso diretto')
+        updated={**claim,'outstanding':{**claim['outstanding'],debtor:remaining-amount},
+                 'version':int(claim['version'])+1}
+        version_action=put_action({'PK':pk,'SK':'ADV#'+advance_id,'value':updated},
+                                   '#v.#version = :previous',{':previous':int(claim['version'])})
+        version_action['Put']['ExpressionAttributeNames']={'#v':'value','#version':'version'}
+        actions.append(version_action)
+        personal_income=ledger_transaction('settle-'+opid,'Rimborso · '+title,'Rimborsi','income',
+                                           amount,date,opid,affectsBalance=True,isTransfer=True,
+                                           readOnly=True,linkedSpaceId=space_id)
+        actions.append(put_action({'PK':user_key(payer),'SK':'TX#'+personal_income['id'],
+                                   'value':personal_income}))
+        if debtor=='fund':
+            shared_out=ledger_transaction('settle-'+opid,'Rimborso · '+title,'Casa','expense',
+                                          amount,date,opid,affectsBalance=True,isTransfer=True,
+                                          createdBy=actor,paymentSource='fund')
+            actions.append(put_action({'PK':pk,'SK':'TX#'+shared_out['id'],'value':shared_out}))
+        else:
+            personal_out=ledger_transaction('settle-'+opid,'Rimborso a un membro · '+title,'Casa',
+                                            'expense',amount,date,opid,affectsBalance=True,
+                                            isTransfer=True,readOnly=True,linkedSpaceId=space_id)
+            actions.append(put_action({'PK':user_key(debtor),'SK':'TX#'+personal_out['id'],
+                                       'value':personal_out}))
+            if debtor != actor:
+                actions.append(member_exists_check(space_id,debtor))
+        op.update({'advanceId':advance_id,'debtorId':debtor,'recipientId':payer})
+        if payer != actor and payer != debtor:
+            actions.append(member_exists_check(space_id,payer))
+    # Corregge il record operazione con le informazioni di riconciliazione.
+    actions[1]=put_action({'PK':pk,'SK':'LEDGER#'+opid,'value':op})
+    txn(actions)
+    return public(op)
+
+
+def reverse_fund_operation(space_id, actor, operation_id, payload):
+    """Compensazione tracciata, senza modificare o cancellare le scritture originali.
+
+    Per ripristinare un rimborso parziale, la versione del credito è controllata
+    nella stessa transazione. Le operazioni originali restano consultabili.
+    """
+    membership(space_id, actor, write=True)
+    opid = safe_id(operation_id)
+    pk = space_key(space_id)
+    original_row = get_row(pk, 'LEDGER#'+opid)
+    if not original_row:
+        raise KeyError('Operazione non trovata')
+    original = original_row['value']
+    if original.get('kind') not in ('contribution','advance','reimbursement'):
+        raise BadRequest('Questa operazione non può essere stornata')
+    if actor != original['createdBy'] and membership(space_id,actor) != 'owner':
+        raise PermissionError('Può stornare solo il creatore o il proprietario del fondo')
+    if get_row(pk,'REV#'+opid):
+        raise BadRequest('Operazione già stornata')
+    reason=payload.get('reason')
+    if not isinstance(reason,str) or not 8 <= len(reason.strip()) <= 250:
+        raise BadRequest('Specifica il motivo della rettifica (8-250 caratteri)')
+    today=dt.datetime.now(ZoneInfo('Europe/Rome')).date().isoformat()
+    reversed_id='rev-'+opid
+    amount=int(original['amountCents'])
+    entry={'id':reversed_id,'kind':'reversal','reverses':opid,
+           'originalKind':original['kind'],'date':today,'amountCents':amount,
+           'description':'Storno · '+original['description'],'reason':reason.strip(),
+           'createdBy':actor,'createdAt':dt.datetime.now(dt.timezone.utc).isoformat()}
+    actions=[auth_check(space_id,actor),
+             put_action({'PK':pk,'SK':'REV#'+opid,'reversalId':reversed_id}),
+             put_action({'PK':pk,'SK':'LEDGER#'+reversed_id,'value':entry})]
+    extra={'ledgerOperationId':reversed_id,'reversesOperationId':opid,
+           'isCorrection':True,'isTransfer':True,'readOnly':True}
+    creator=original['createdBy']
+    if original['kind']=='contribution':
+        if not get_row(pk,'MEMBER#'+creator):
+            raise BadRequest('Autore del versamento non più membro: rettifica manuale necessaria')
+        actions.extend([
+            put_action({'PK':pk,'SK':'TX#rvf-'+opid,
+                        'value':ledger_transaction('rvf-'+opid,entry['description'],'Casa',
+                                  'expense',amount,today,reversed_id,affectsBalance=True,**extra_without_ledger(extra))}),
+            put_action({'PK':user_key(creator),'SK':'TX#rvc-'+opid,
+                        'value':ledger_transaction('rvc-'+opid,entry['description'],'Rimborsi',
+                                  'income',amount,today,reversed_id,affectsBalance=True,
+                                  linkedSpaceId=space_id,**extra_without_ledger(extra))})])
+        if creator!=actor:
+            actions.append(member_exists_check(space_id,creator))
+    elif original['kind']=='advance':
+        claimrow=get_row(pk,'ADV#'+opid)
+        if not claimrow:
+            raise BadRequest('Anticipo privo della scrittura di credito')
+        claim=claimrow['value']
+        originally=({ 'fund':amount } if claim['settlementMode']=='fund' else
+                    {who:int(v) for who,v in claim['allocations'].items()
+                     if who!=claim['payerId'] and int(v)>0}
+                    if claim['settlementMode']=='direct' else {})
+        if {k:int(v) for k,v in claim['outstanding'].items()}!=originally:
+            raise BadRequest('Prima storna tutti i rimborsi collegati a questo anticipo')
+        if not get_row(pk,'MEMBER#'+claim['payerId']):
+            raise BadRequest('Anticipante non più membro: rettifica manuale necessaria')
+        newclaim={**claim,'reversedAt':today,'version':int(claim['version'])+1}
+        check=put_action({'PK':pk,'SK':'ADV#'+opid,'value':newclaim},
+                         '#v.#version = :version',{':version':int(claim['version'])})
+        check['Put']['ExpressionAttributeNames']={'#v':'value','#version':'version'}
+        actions.append(check)
+        # Uno storno di spesa anticipata non restituisce denaro al fondo.
+        actions.extend([
+          put_action({'PK':pk,'SK':'TX#rvf-'+opid,
+                      'value':ledger_transaction('rvf-'+opid,entry['description'],
+                            'Altre entrate','income',amount,today,reversed_id,
+                            affectsBalance=False,**extra_without_ledger(extra))}),
+          put_action({'PK':user_key(claim['payerId']),'SK':'TX#rvc-'+opid,
+                      'value':ledger_transaction('rvc-'+opid,entry['description'],
+                            'Rimborsi','income',amount,today,reversed_id,
+                            affectsBalance=True,linkedSpaceId=space_id,**extra_without_ledger(extra))})])
+        if claim['payerId'] != actor:
+            actions.append(member_exists_check(space_id,claim['payerId']))
+    else:
+        advance_id=original['advanceId']
+        claimrow=get_row(pk,'ADV#'+advance_id)
+        if not claimrow or get_row(pk,'REV#'+advance_id):
+            raise BadRequest('Anticipo associato mancante o stornato')
+        claim=claimrow['value']
+        debtor=original['debtorId']
+        if debtor not in claim['outstanding']:
+            raise BadRequest('Credito originale non compatibile')
+        # Riporta in vita la quota già rimborsata, senza duplicare un pagamento.
+        updated={**claim,'outstanding':{**claim['outstanding'],
+                         debtor:int(claim['outstanding'][debtor])+amount},
+                 'version':int(claim['version'])+1}
+        maximum=(int(claim['amountCents']) if debtor=='fund' else int(claim['allocations'].get(debtor,0)))
+        if updated['outstanding'][debtor]>maximum:
+            raise BadRequest('Il credito risulterebbe superiore alla quota iniziale')
+        check=put_action({'PK':pk,'SK':'ADV#'+advance_id,'value':updated},
+                         '#v.#version = :version',{':version':int(claim['version'])})
+        check['Put']['ExpressionAttributeNames']={'#v':'value','#version':'version'}
+        actions.append(check)
+        recipient=original['recipientId']
+        if not get_row(pk,'MEMBER#'+recipient):
+            raise BadRequest('Beneficiario non più membro: rettifica manuale necessaria')
+        actions.append(put_action({'PK':user_key(recipient),'SK':'TX#rvc-'+opid,
+                      'value':ledger_transaction('rvc-'+opid,entry['description'],
+                          'Casa','expense',amount,today,reversed_id,affectsBalance=True,
+                          linkedSpaceId=space_id,**extra_without_ledger(extra))}))
+        if debtor=='fund':
+            actions.append(put_action({'PK':pk,'SK':'TX#rvf-'+opid,
+                         'value':ledger_transaction('rvf-'+opid,entry['description'],
+                         'Altre entrate','income',amount,today,reversed_id,
+                         affectsBalance=True,**extra_without_ledger(extra))}))
+        else:
+            if not get_row(pk,'MEMBER#'+debtor):
+                raise BadRequest('Debitore non più membro: rettifica manuale necessaria')
+            actions.append(put_action({'PK':user_key(debtor),'SK':'TX#rvd-'+opid,
+                         'value':ledger_transaction('rvd-'+opid,entry['description'],
+                         'Rimborsi','income',amount,today,reversed_id,
+                         affectsBalance=True,linkedSpaceId=space_id,**extra_without_ledger(extra))}))
+            if debtor!=actor:
+                actions.append(member_exists_check(space_id,debtor))
+        if recipient!=actor and recipient!=debtor:
+            actions.append(member_exists_check(space_id,recipient))
+    txn(actions)
+    return {'reversed':True,'reversalId':reversed_id,'originalId':opid,'reason':reason.strip()}
+
+
+def extra_without_ledger(extra):
+    """ledger_transaction riceve l'id dell'operazione come parametro posizionale."""
+    return {key:value for key,value in extra.items() if key!='ledgerOperationId'}
+
+
+def positive_decimal(value, field, max_digits=8, allow_zero=False):
+    try:
+        if isinstance(value,bool) or not isinstance(value,(str,int,float)):
+            raise ValueError()
+        amount=Decimal(str(value))
+        if not amount.is_finite() or amount<0 or (amount==0 and not allow_zero) or amount>1000000:
+            raise ValueError()
+        if amount.as_tuple().exponent < -max_digits:
+            raise ValueError()
+        return amount
+    except (ValueError,InvalidOperation):
+        raise BadRequest(field+' non valido') from None
+
+
+def capital_item(payload, expected_id=None, revision=1):
+    ident=safe_id(payload.get('id'))
+    if expected_id and ident!=expected_id:
+        raise BadRequest('Identificativo patrimonio non coincidente')
+    kind=payload.get('kind')
+    if kind not in ('investment','other','cash_outside_ledger','debt'):
+        raise BadRequest('Tipo elemento patrimoniale non valido')
+    name=payload.get('name')
+    if not isinstance(name,str) or not 1 <= len(name.strip()) <= 100:
+        raise BadRequest('Nome del capitale non valido')
+    as_of=date_value(payload.get('asOf')).isoformat()
+    if as_of>dt.datetime.now(ZoneInfo('Europe/Rome')).date().isoformat():
+        raise BadRequest('Non puoi indicare una valutazione futura')
+    asset={'id':ident,'kind':kind,'name':name.strip(),
+           'amountCents':cents(payload.get('value'),allow_zero=True),
+           'asOf':as_of,'revision':revision,
+           'updatedAt':dt.datetime.now(dt.timezone.utc).isoformat()}
+    if kind=='investment':
+        asset_class=payload.get('assetClass','other')
+        if asset_class not in ('stock','etf','bond','fund','other'):
+            raise BadRequest('Classe investimento non valida')
+        symbol=payload.get('symbol','')
+        if not isinstance(symbol,str) or len(symbol)>20 or (symbol and not re.fullmatch(r'[A-Za-z0-9._-]+',symbol)):
+            raise BadRequest('Ticker o ISIN non valido')
+        asset.update({'assetClass':asset_class,'symbol':symbol.upper(),'currency':'EUR'})
+        if payload.get('quantity') is not None or payload.get('unitPrice') is not None:
+            quantity=positive_decimal(payload.get('quantity'),'Quantità')
+            price=positive_decimal(payload.get('unitPrice'),'Prezzo unitario',6,True)
+            calculated=int((quantity*price*100).quantize(Decimal('1'),rounding='ROUND_HALF_UP'))
+            if calculated>100000000:
+                raise BadRequest('Valore posizione oltre il limite')
+            asset.update({'quantity':str(quantity),'unitPrice':str(price),
+                          'amountCents':calculated})
+        if payload.get('costBasis') is not None:
+            asset['costBasisCents']=cents(payload['costBasis'],allow_zero=True)
+        if payload.get('feesPaid') is not None:
+            asset['feesPaidCents']=cents(payload['feesPaid'],allow_zero=True)
+    return asset
+
+
+def capital_public(row):
+    item=public(row)
+    if 'costBasisCents' in item:
+        item['costBasis']=int(item.pop('costBasisCents'))/100
+        item['unrealizedGain']=round((item['amount']-item['costBasis']),2)
+        item['gainPct']=round(100*(item['amount']-item['costBasis'])/item['costBasis'],2) if item['costBasis']>0 else None
+    if 'feesPaidCents' in item:
+        item['feesPaid']=int(item.pop('feesPaidCents'))/100
+    return item
+
+
+def simulate_finances(sub, payload):
+    """Scenari di cassa deterministici. Nessun rendimento implicito o dato esterno."""
+    if not isinstance(payload,dict):
+        raise BadRequest('Scenario non valido')
+    months=payload.get('months',12)
+    if type(months) is not int or not 1<=months<=36:
+        raise BadRequest('Durata simulazione: da 1 a 36 mesi')
+    contributions=cents(payload.get('monthlyReserve',0),allow_zero=True)
+    added=cents(payload.get('extraExpenses',0),allow_zero=True)
+    reduction=cents(payload.get('incomeReduction',0),allow_zero=True)
+    unexpected=cents(payload.get('oneTimeExpense',0),allow_zero=True)
+    state=state_for(user_key(sub))
+    today=dt.datetime.now(ZoneInfo('Europe/Rome')).date()
+    tx=[t for t in state['transactions'] if t['date']<=today.isoformat()]
+    liquid=sum(round(Decimal(str(t['amount']))*100)*(1 if t['type']=='income' else -1)
+               for t in tx if t.get('affectsBalance',True))
+    first=today.replace(day=1)
+    # Ultimi tre mesi COMPLETI, senza trasferimenti e storni.
+    sample=[]
+    for i in (3,2,1):
+        start=month_offset(first,-i).isoformat()
+        end=month_offset(first,-i+1).isoformat()
+        rows=[t for t in tx if start<=t['date']<end and t.get('affectsBalance',True)
+              and not t.get('isTransfer') and not t.get('isCorrection') and not t.get('isReversed')]
+        sample.append((sum(round(Decimal(str(t['amount']))*100) for t in rows if t['type']=='income'),
+                       sum(round(Decimal(str(t['amount']))*100) for t in rows if t['type']=='expense')))
+    avg_income=sum(n[0] for n in sample)//3
+    avg_expenses=sum(n[1] for n in sample)//3
+    original=liquid
+    changed=liquid
+    reserve=0
+    rows=[]
+    for n in range(1,months+1):
+        original+=avg_income-avg_expenses
+        changed+=max(0,avg_income-reduction)-avg_expenses-added-(unexpected if n==1 else 0)-contributions
+        reserve+=contributions
+        current=month_offset(first,n)
+        rows.append({'month':current.strftime('%Y-%m'),'baseline':original/100,
+                     'available':changed/100,'reserved':reserve/100,
+                     'combined':(changed+reserve)/100})
+    recorded_months=sum(any(x>0 for x in pair) for pair in sample)
+    return {'initialLiquidity':liquid/100,'monthlyIncomeEstimate':avg_income/100,
+            'monthlyExpenseEstimate':avg_expenses/100,'monthsWithData':recorded_months,
+            'scenario':{'months':months,'monthlyReserve':contributions/100,
+                        'extraExpenses':added/100,'incomeReduction':reduction/100,
+                        'oneTimeExpense':unexpected/100},'projection':rows,
+            'warnings':(['Sono disponibili pochi mesi con movimenti: la simulazione può essere poco rappresentativa.']
+                        if recorded_months<3 else [])+
+                       (['La liquidità disponibile scende sotto zero nel periodo simulato.']
+                        if any(r['available']<0 for r in rows) else []),
+            'assumptions':['Media aritmetica degli ultimi tre mesi completi, inclusi eventuali mesi senza registrazioni.',
+                           'Nessuna rivalutazione degli investimenti, inflazione, tasse aggiuntive o rendimento ipotizzato.',
+                           'La riserva mensile è un trasferimento interno: aumenta la riserva e riduce la cassa disponibile.',
+                           'Le scadenze future non vengono aggiunte separatamente per evitare il doppio conteggio con le medie.']}
+
+
+
+def private_insights(sub):
+    pk=user_key(sub)
+    state=state_for(pk)
+    transactions=state['transactions']
+    today=dt.datetime.now(ZoneInfo('Europe/Rome')).date()
+    relevant=[t for t in transactions if t['date']<=today.isoformat()]
+    liquid=sum(round(Decimal(str(t['amount']))*100)*(1 if t['type']=='income' else -1)
+               for t in relevant if t.get('affectsBalance',True))
+    assets=[capital_public(r['value']) for r in list_prefix(pk,'ASSET#')]
+    totals={kind:sum(round(Decimal(str(a['amount']))*100) for a in assets if a['kind']==kind)
+            for kind in ('investment','other','cash_outside_ledger','debt')}
+    net=liquid+totals['investment']+totals['other']+totals['cash_outside_ledger']-totals['debt']
+    first=(today.replace(day=1)-dt.timedelta(days=1)).replace(day=1)
+    monthly=[]
+    for i in range(3):
+        end=month_offset(first,-i+1)
+        begin=month_offset(first,-i)
+        group=[t for t in relevant if begin.isoformat()<=t['date']<end.isoformat()
+               and t.get('affectsBalance',True) and not t.get('isTransfer',False) and not t.get('isCorrection',False)
+               and not t.get('isReversed',False)]
+        income=sum(round(Decimal(str(t['amount']))*100) for t in group if t['type']=='income')
+        spent=sum(round(Decimal(str(t['amount']))*100) for t in group if t['type']=='expense')
+        monthly.append({'month':begin.strftime('%Y-%m'),'income':income/100,'expenses':spent/100,
+                        'saved':(income-spent)/100})
+    essentials = {'Casa','Alimentari','Bollette','Trasporti','Salute'}
+    expense_sample=[round(Decimal(str(t['amount']))*100) for t in relevant
+                   if t['type']=='expense' and t.get('affectsBalance',True)
+                   and not t.get('isTransfer',False) and not t.get('isCorrection',False)
+                   and not t.get('isReversed',False) and t.get('category') in essentials
+                   and month_offset(first,1).isoformat() > t['date'] >= month_offset(first,-2).isoformat()]
+    essential_avg = sum(expense_sample)//3
+    coverage=(round(liquid/essential_avg,1) if essential_avg>0 and liquid>=0 else None)
+    notices=[]
+    if liquid<0:
+        notices.append({'type':'warning','title':'Saldo disponibile negativo',
+                        'description':'Verifica movimenti, saldo iniziale e prossime scadenze.'})
+    if essential_avg==0:
+        notices.append({'type':'info','title':'Spese essenziali non ancora stimabili',
+                        'description':'Servono movimenti categorizzati degli ultimi tre mesi completi.'})
+    elif coverage is not None:
+        notices.append({'type':'info','title':'Copertura delle spese essenziali',
+                        'description':f'Liquidità registrata: circa {coverage} mesi al ritmo medio recente. Non è una garanzia futura.'})
+    portfolio=[]
+    invested=totals['investment']
+    for item in assets:
+        if item['kind']!='investment':
+            continue
+        share=(int(round(Decimal(str(item['amount']))*100))*100/invested) if invested else 0
+        age=(today-date_value(item['asOf'])).days
+        portfolio.append({'id':item['id'],'name':item['name'],'value':item['amount'],
+                          'weightPercent':round(share,1),'asOf':item['asOf'],
+                          'daysSinceValuation':age,'unrealizedGain':item.get('unrealizedGain'),
+                          'gainPct':item.get('gainPct'),'assetClass':item.get('assetClass','other')})
+        if share>40 and len([a for a in assets if a['kind']=='investment'])>1:
+            notices.append({'type':'info','title':'Concentrazione del portafoglio',
+                            'description':f"{item['name']} pesa circa il {share:.1f}% degli investimenti registrati. Valuta il rischio di concentrazione."})
+        if age>30:
+            notices.append({'type':'info','title':'Valutazione da aggiornare',
+                            'description':f"{item['name']}: ultimo aggiornamento {age} giorni fa."})
+    # Suggerimenti sul budget: soglie verificabili rispetto al mese completo precedente.
+    previous=first.isoformat()
+    last_end=month_offset(first,1).isoformat()
+    for category, amount in state['budgets'].items():
+        limit=round(Decimal(str(amount))*100)
+        if not limit:
+            continue
+        out=sum(round(Decimal(str(t['amount']))*100) for t in relevant
+                if previous<=t['date']<last_end and t['type']=='expense'
+                and t.get('category')==category and t.get('affectsBalance',True)
+                and not t.get('isTransfer') and not t.get('isReversed')
+                and not t.get('isCorrection'))
+        if out >= limit:
+            notices.append({'type':'warning','title':'Budget superato · '+category,
+                            'description':f"Nel mese scorso hai speso {out/100:.2f} € rispetto a {limit/100:.2f} € di budget."})
+        elif out >= limit*8//10:
+            notices.append({'type':'info','title':'Budget vicino al limite · '+category,
+                            'description':f"Nel mese scorso hai utilizzato circa {out/limit*100:.0f}% del budget."})
+    if totals['investment']:
+        notices.append({'type':'info','title':'Valori degli investimenti',
+                        'description':'Le valutazioni sono manuali e potrebbero non riflettere i prezzi di mercato.'})
+    return {'liquidity':liquid/100,'netWorth':net/100,'assets':assets,
+            'totals':{k:v/100 for k,v in totals.items()},
+            'lastThreeMonths':monthly,'essentialAverage':essential_avg/100,
+            'coverageMonths':coverage,'notices':notices,'portfolio':portfolio,
+            'assumptions':['Il saldo personale è la liquidità tracciata dai movimenti.',
+                'Il contante esterno al registro va inserito separatamente.',
+                'Nessuna quota del fondo condiviso è attribuita automaticamente al patrimonio personale.',
+                'Versamenti e rimborsi tracciati non sono reddito o spesa nei consigli.']}
+
+
 def state_for(pk):
     tx, budgets, rules, planned = [], {}, [], []
+    reversed_operations = set()
     for row in query_user(pk):
         sk = row['SK']
         if sk.startswith('TX#') and not row.get('skipped'):
-            tx.append(public(row['value']))
+            transaction = public(row['value'])
+            tx.append(transaction)
+            if transaction.get('reversesOperationId'):
+                reversed_operations.add(transaction['reversesOperationId'])
         elif sk.startswith('B#'):
             budgets[sk[2:]] = int(row['amountCents'])/100
         elif sk.startswith('REC#'):
             rules.append(public(row['value']))
         elif sk.startswith('PLAN#'):
             planned.append(public(row['value']))
+        elif sk.startswith('REV#'):
+            reversed_operations.add(sk[4:])
+    for transaction in tx:
+        if transaction.get('ledgerOperationId') in reversed_operations:
+            transaction['isReversed'] = True
     return {'transactions':tx,'budgets':budgets,'recurring':rules,'planned':planned}
 
 
@@ -680,6 +1229,65 @@ def handle_request(event, claims, sub, pk, route, params):
         data_pk = space_key(space_id)
     else:
         data_pk = pk
+    if route == 'GET /fund':
+        if not space_id:
+            raise BadRequest('Seleziona un fondo condiviso')
+        return response(200,read_fund(space_id,sub))
+    if route == 'POST /fund/operations':
+        if not space_id:
+            raise BadRequest('Seleziona un fondo condiviso')
+        return response(201,create_fund_operation(space_id,sub,body_json(event)))
+    if route == 'POST /fund/operations/{id}/reverse':
+        if not space_id:
+            raise BadRequest('Seleziona un fondo condiviso')
+        return response(201,reverse_fund_operation(space_id,sub,params.get('id'),body_json(event)))
+    if route == 'POST /insights/simulate':
+        if space_id:
+            raise BadRequest('Simulazioni riservate al bilancio personale')
+        return response(200,simulate_finances(sub,body_json(event)))
+    if route == 'GET /insights':
+        if space_id:
+            raise BadRequest('Gli Insights patrimoniali sono disponibili solo nel bilancio personale')
+        return response(200,private_insights(sub))
+    if route == 'POST /capital/items':
+        if space_id:
+            raise BadRequest('Il patrimonio personale non appartiene al fondo condiviso')
+        item=capital_item(body_json(event))
+        if len(list_prefix(pk,'ASSET#'))>=CAPITAL_ITEM_LIMIT:
+            raise BadRequest('Numero massimo di elementi patrimoniali raggiunto')
+        TABLE.put_item(Item={'PK':pk,'SK':'ASSET#'+item['id'],'value':item},
+                       ConditionExpression='attribute_not_exists(PK)')
+        return response(201,capital_public(item))
+    if route == 'PUT /capital/items/{id}':
+        if space_id:
+            raise BadRequest('Il patrimonio personale non appartiene al fondo condiviso')
+        ident=safe_id(params.get('id'))
+        old=get_row(pk,'ASSET#'+ident)
+        if not old:
+            raise KeyError('Elemento patrimoniale inesistente')
+        payload=body_json(event)
+        expected=payload.get('revision')
+        if type(expected) is not int or expected != int(old['value'].get('revision',1)):
+            raise BadRequest('Versione dell’elemento patrimoniale non aggiornata')
+        item=capital_item(payload,ident,expected+1)
+        # Il controllo della versione è necessario se due dispositivi aggiornano insieme.
+        condition=('#v.#revision = :old' if 'revision' in old['value']
+                   else 'attribute_exists(PK) AND attribute_not_exists(#v.#revision)')
+        args={'Item':{'PK':pk,'SK':'ASSET#'+ident,'value':item},
+              'ConditionExpression':condition,'ExpressionAttributeNames':{'#v':'value'}}
+        if 'revision' in old['value']:
+            args['ExpressionAttributeValues']={':old':expected}
+        TABLE.put_item(**args)
+        return response(200,capital_public(item))
+    if route == 'DELETE /capital/items/{id}':
+        if space_id:
+            raise BadRequest('Il patrimonio personale non appartiene al fondo condiviso')
+        ident=safe_id(params.get('id'))
+        if not get_row(pk,'ASSET#'+ident):
+            raise KeyError('Elemento patrimoniale inesistente')
+        TABLE.delete_item(Key={'PK':pk,'SK':'ASSET#'+ident},
+                          ConditionExpression='attribute_exists(PK)')
+        return response(204)
     if route == 'GET /favorites':
         return response(200,{'favorites':favorites_for(sub,space_id)})
     if route == 'POST /favorites':
@@ -759,6 +1367,8 @@ def handle_request(event, claims, sub, pk, route, params):
             previous = get_row(pk,'TX#'+rid) or {}
             if previous.get('skipped'):
                 raise KeyError('Movimento eliminato')
+            if (previous.get('value') or {}).get('ledgerOperationId'):
+                return response(403,{'error':'Movimento contabile non modificabile'})
             if (previous.get('value') or {}).get('linkedSpaceId'):
                 return response(403,{'error':'Modifica il movimento nel bilancio condiviso originale'})
             rec_id = (previous.get('value') or {}).get('recurringId')
@@ -784,6 +1394,8 @@ def handle_request(event, claims, sub, pk, route, params):
         if sk.startswith('TX#'):
             if old.get('skipped'):
                 return response(204)
+            if (old.get('value') or {}).get('ledgerOperationId'):
+                return response(403,{'error':'Movimento contabile non eliminabile'})
             if not space_id and (old.get('value') or {}).get('linkedSpaceId'):
                 return response(403,{'error':'Elimina il movimento dal bilancio condiviso'})
             if (old.get('value') or {}).get('recurringId'):

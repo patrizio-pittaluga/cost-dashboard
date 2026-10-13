@@ -33,3 +33,24 @@
 }
 @media(max-width:480px){.quick-two{grid-template-columns:1fr}.quick-actions{display:grid;grid-template-columns:1fr 1fr}.quick-actions button:last-child{grid-column:1/-1}.calendar-controls{gap:5px}.calendar-controls strong{min-width:87px;font-size:11px}.calendar-weekdays{font-size:10px}.calendar-cell{min-height:54px;padding:5px}.event-row{flex-wrap:wrap}.event-info{flex-basis:calc(100% - 150px)}.event-value{margin-left:auto}.panel-title:has(.calendar-controls){flex-direction:column}.upcoming-panel .panel-title .link-btn{font-size:12px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
+
+/* Moneta 2.2: fondo comune avanzato e Insights personali */
+.fund-summary-grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,1fr);gap:18px;margin-bottom:18px}
+.fund-hero{min-height:180px;margin:0;display:flex;align-items:center}.fund-hero .hero-value{font-size:clamp(28px,4vw,43px)}
+.fund-action-panel{margin-bottom:18px}.fund-extra{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;padding:18px;border:1px solid var(--stroke);border-radius:13px;background:#152338}
+.fund-extra.hidden{display:none}.fund-extra>.fund-split-head,.fund-extra>.fund-split-rows,.fund-extra>p,.fund-extra>.tip{grid-column:1/-1}
+.fund-split-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.fund-split-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.fund-portion{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 13px;background:#203249;border-radius:12px;font-size:12px}
+.fund-portion span{min-width:0;overflow-wrap:anywhere}.fund-portion input{max-width:120px;text-align:right}.fund-help .muted{margin:0}
+.fund-list{display:flex;flex-direction:column;gap:0}.fund-row{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--stroke);font-size:13px}.fund-row:last-child{border-bottom:0}.fund-row strong{white-space:nowrap}
+.fund-entry{display:flex;flex-direction:column;gap:5px;padding:12px 0;border-bottom:1px solid var(--stroke);font-size:13px;min-width:0}.fund-entry:last-child{border-bottom:0}.fund-entry .muted{font-size:11px;line-height:1.5;overflow-wrap:anywhere}.fund-entry strong{overflow-wrap:anywhere}
+@media(max-width:900px){.fund-summary-grid{grid-template-columns:1fr}}
+@media(max-width:600px){.fund-extra,.fund-split-rows{grid-template-columns:1fr}.fund-portion{padding:9px}.fund-portion input{max-width:110px}.fund-hero{min-height:150px}.fund-action-panel .form-grid{grid-template-columns:1fr}.fund-action-panel .field{grid-column:1/-1}.fund-row{align-items:flex-start}.fund-row button{flex:0 0 auto}}
+
+/* Moneta 2.2: rettifiche guidate, investimenti e simulazioni */
+.portfolio-summary{display:flex;gap:12px;flex-wrap:wrap;margin:15px 0}.portfolio-kpi{background:#203249;border:1px solid var(--stroke);border-radius:12px;padding:14px;min-width:150px;flex:1}.portfolio-kpi span{display:block;font-size:11px;color:var(--muted);margin-bottom:6px}.portfolio-kpi strong{font-size:20px}
+.portfolio-track{width:100%;height:7px;background:#293b51;border-radius:99px;overflow:hidden;margin:8px 0}.portfolio-track>span{display:block;height:100%;background:#55e8bb;border-radius:99px}
+.portfolio-entry{padding:15px 0;border-bottom:1px solid var(--stroke)}.portfolio-entry:last-child{border:0}.portfolio-meta{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin-top:6px;color:var(--muted)}.portfolio-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.fund-ledger-action{margin-top:8px;align-self:flex-start}.fund-entry.is-reversed{opacity:.62}.fund-entry.is-reversed>strong{text-decoration:line-through}.insight-advice{padding:13px;border:1px solid var(--stroke);border-radius:12px;margin:6px 0}.insight-advice.warning{border-color:#ba7774}.insight-advice strong{font-size:13px}.insight-advice p{font-size:12px;margin:7px 0 0;color:var(--muted)}
+.simulation-scroll{overflow-x:auto;margin-top:14px}.simulation-table{width:100%;border-collapse:collapse;min-width:460px;font-size:12px}.simulation-table th,.simulation-table td{padding:11px 8px;border-bottom:1px solid var(--stroke);text-align:right}.simulation-table th:first-child,.simulation-table td:first-child{text-align:left}.scenario-warning{color:#ff8d9e}.scenario-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+#reverseDialog{max-width:min(530px,calc(100vw - 24px))}#reverseDialog .tip{margin:14px 0}
+@media(max-width:600px){.portfolio-kpi{min-width:calc(50% - 6px);padding:12px}.portfolio-kpi strong{font-size:17px}.portfolio-actions button{min-height:42px}.portfolio-meta{gap:6px}.portfolio-entry .fund-row{flex-wrap:wrap}.fund-ledger-action{min-height:40px}#capitalInvestmentFields{grid-template-columns:1fr}.simulation-table{font-size:11px}}

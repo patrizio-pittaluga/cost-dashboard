@@ -1,13 +1,13 @@
-# Moneta 2.1.0 — Note di rilascio
+# Moneta 2.2 — Release estesa
 
-- Inserimento rapido desktop/mobile + salvataggio consecutivo.
-- Preferiti privati per utente/spazio, con creazione e rimozione.
-- Calendario delle scadenze ricorrenti e singole, vista mensile ed elenco.
-- Creazione, modifica, cancellazione e conferma della scadenza singola con idempotenza e collegamento contabile atomico.
-- PWA con file pubblici in cache, senza storage offline di dati finanziari.
-- Nuovo pacchetto Lambda in bucket S3 privato `eu-south-1`: CloudFormation backend sotto limite template; mantenimento della Lambda esistente.
-- Nuove rotte HTTP API JWT e record `PLAN#`/`FAV#` nella tabella esistente.
-- Nessuna modifica distruttiva prevista a Cognito, DynamoDB o dati preesistenti.
-- Verifiche offline: suite unittest, controllo sintassi Python/JS/bash, esecuzione mock dell'interfaccia mobile.
-
-**Non verificato:** deploy AWS e accesso Cognito reale nell'account dell'utente. Seguire README e collaudo dopo deploy.
+- Aggiunto storno guidato di versamenti, anticipi e rimborsi con motivo obbligatorio, audit e compensazioni non distruttive.
+- Aggiunti controlli per impedire lo storno di un anticipo non completamente riconciliato.
+- Aggiunta la vista "Portafoglio investimenti" con quote percentuali, costi storici, data valorizzazione e plus/minusvalenze non realizzate.
+- Aggiunti aggiornamento delle schede patrimoniali e controllo ottimistico delle revisioni.
+- Aggiunto simulatore della liquidità fino a 36 mesi con ipotesi trasparenti, senza rendimenti finanziari presunti.
+- Esteso il motore di Insights con segnalazioni su concentrazione, valutazioni datate e budget mensili.
+- Esclusi dal conteggio dei consumi gli storni e le operazioni annullate, mantenendo l'effetto corretto sui saldi contabili.
+- Conservati gli account Cognito, gli spazi personali e familiari e i record esistenti.
+- Tre rotte JWT nuove in CloudFormation; nessuna risorsa preesistente modificata o rimossa.
+- Cache statica PWA aggiornata alla versione v2.2.1.
+- Suite automatica: 112 test locali; deploy e visual QA live ancora da eseguire.

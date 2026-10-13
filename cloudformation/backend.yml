@@ -418,6 +418,30 @@ Resources:
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
 
 
+  FundGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'GET /fund', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  FundOperationsPostRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'POST /fund/operations', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  InsightsGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'GET /insights', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  CapitalPostRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'POST /capital/items', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  CapitalDeleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'DELETE /capital/items/{id}', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  FundOperationsReverseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'POST /fund/operations/{id}/reverse', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  InsightsSimulationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'POST /insights/simulate', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
+  CapitalPutRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: {ApiId: !Ref HttpApi, RouteKey: 'PUT /capital/items/{id}', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
   FavoritesGetRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: {ApiId: !Ref HttpApi, RouteKey: 'GET /favorites', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref JwtAuthorizer}
