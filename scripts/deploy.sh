@@ -38,7 +38,7 @@ if [[ -z "$COGNITO_PREFIX" ]]; then
 fi
 
 printf 'Moneta: deploy stack %s e %s.\n' "$FRONTEND_STACK" "$BACKEND_STACK"
-printf '%s\n' '[1/5] Rigenerazione del template Python...'
+printf '%s\n' '[1/5] Creazione pacchetto Lambda...' 
 python3 scripts/sync_lambda.py
 
 # Conserva i parametri del dominio nei deploy successivi.
@@ -74,13 +74,29 @@ get_output() {
 DOMAIN="$(get_output us-east-1 "$FRONTEND_STACK" CloudFrontDomain)"
 BUCKET="$(get_output us-east-1 "$FRONTEND_STACK" BucketName)"
 DISTRIBUTION="$(get_output us-east-1 "$FRONTEND_STACK" DistributionId)"
+# Lambda Python 3.13 supera il limite del Code.ZipFile inline CloudFormation.
+# Deployment ZIP privato nella stessa regione della Lambda: nessun cambiamento ai dati.
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+CODE_BUCKET="moneta-deploy-${ACCOUNT_ID}-eu-south-1"
+if ! aws s3api head-bucket --bucket "$CODE_BUCKET" 2>/dev/null; then
+  aws s3api create-bucket --bucket "$CODE_BUCKET" --region eu-south-1 \
+    --create-bucket-configuration LocationConstraint=eu-south-1 >/dev/null
+  aws s3api put-public-access-block --bucket "$CODE_BUCKET" \
+    --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+  aws s3api put-bucket-encryption --bucket "$CODE_BUCKET" \
+    --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+fi
+CODE_HASH="$(sha256sum dist/moneta-lambda.zip | cut -d' ' -f1)"
+CODE_KEY="lambda/moneta-${CODE_HASH}.zip"
+aws s3 cp dist/moneta-lambda.zip "s3://$CODE_BUCKET/$CODE_KEY" \
+  --region eu-south-1 --sse AES256 --only-show-errors
 printf '%s\n' '[3/5] Cognito, API HTTP, Lambda Python, DynamoDB (eu-south-1 Milano)...'
 aws cloudformation deploy \
   --region eu-south-1 \
   --stack-name "$BACKEND_STACK" \
   --template-file cloudformation/backend.yml \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" "CustomDomainName=$MONETA_CUSTOM_DOMAIN" \
+  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" "CustomDomainName=$MONETA_CUSTOM_DOMAIN" "LambdaCodeBucket=$CODE_BUCKET" "LambdaCodeKey=$CODE_KEY" \
   --no-fail-on-empty-changeset
 
 API_URL="$(get_output eu-south-1 "$BACKEND_STACK" ApiUrl)"
@@ -104,6 +120,10 @@ printf '%s\n' '[5/5] Caricamento Moneta e invalidazione cache CloudFront...'
 aws s3 sync frontend/ "s3://$BUCKET/" --region us-east-1 \
   --exclude 'config.json' \
   --cache-control 'public, max-age=300'
+aws s3 cp frontend/sw.js "s3://$BUCKET/sw.js" --region us-east-1 \
+  --content-type 'application/javascript' --cache-control 'no-store' --only-show-errors
+aws s3 cp frontend/manifest.webmanifest "s3://$BUCKET/manifest.webmanifest" --region us-east-1 \
+  --content-type 'application/manifest+json' --cache-control 'public, max-age=300' --only-show-errors
 aws s3 cp frontend/config.json "s3://$BUCKET/config.json" \
   --region us-east-1 \
   --content-type 'application/json' \

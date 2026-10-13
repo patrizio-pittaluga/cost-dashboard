@@ -556,8 +556,91 @@ def list_members(space_id, sub):
             for row in list_prefix(space_key(space_id),'MEMBER#')]
 
 
+# --- Moneta 2.1: preferiti privati e scadenze una tantum ---
+FAVORITES_LIMIT = 40
+PLANNED_LIMIT = 200
+
+
+def validated_favorite(payload, expected_id=None):
+    ident = payload.get('id')
+    if not isinstance(ident, str) or not ID_RE.fullmatch(ident) or (expected_id and ident != expected_id):
+        raise BadRequest('ID preferito non valido')
+    space_id = payload.get('spaceId') or ''
+    if space_id:
+        space_key(space_id)
+    kind = payload.get('type')
+    if kind not in ('income', 'expense'):
+        raise BadRequest('Tipo preferito non valido')
+    category = payload.get('category')
+    if category not in (INCOME if kind == 'income' else EXPENSE):
+        raise BadRequest('Categoria preferito non valida')
+    description = payload.get('description')
+    if not isinstance(description, str) or not 1 <= len(description.strip()) <= 120:
+        raise BadRequest('Descrizione preferito non valida')
+    note = payload.get('note', '')
+    if not isinstance(note, str) or len(note) > 300:
+        raise BadRequest('Nota preferito non valida')
+    source = payload.get('paymentSource', 'fund')
+    if source not in ('fund', 'personal'):
+        raise BadRequest('Pagamento preferito non valido')
+    return {'id':ident,'spaceId':space_id,'type':kind,'category':category,
+            'description':description.strip(),'amountCents':cents(payload.get('amount')),
+            'paymentSource':source,'note':note}
+
+
+def favorites_for(sub, space_id):
+    return [public(row['value']) for row in list_prefix(user_key(sub),'FAV#')
+            if row['value'].get('spaceId','') == (space_id or '')]
+
+
+def planned_record(payload, expected_id=None):
+    if len(str(payload.get('id',''))) > 75:
+        raise BadRequest('ID scadenza troppo lungo')
+    # Riutilizza le validazioni dei movimenti per mantenere compatibili categorie e importi.
+    data = validate_record({**payload,'date':payload.get('dueDate')},expected_id)
+    source = payload.get('paymentSource','fund')
+    if source not in ('fund','personal'):
+        raise BadRequest('Origine pagamento non valida')
+    return {**{key:value for key,value in data.items() if key!='date'},
+            'dueDate':data['date'],'paymentSource':source,'status':'scheduled'}
+
+
+def complete_planned(data_pk, space_id, sub, ident, paid_date):
+    if not isinstance(ident,str) or not ID_RE.fullmatch(ident):
+        raise BadRequest('ID scadenza non valido')
+    original = get_row(data_pk,'PLAN#'+ident)
+    if not original:
+        raise KeyError('Scadenza inesistente')
+    plan = original['value']
+    if plan.get('status') == 'completed':
+        return {'completed':True,'transactionId':plan.get('transactionId')}
+    if plan.get('status') != 'scheduled':
+        raise BadRequest('Stato scadenza non valido')
+    txid = 'plan-'+ident
+    if len(txid) > 80:
+        raise BadRequest('ID scadenza troppo lungo')
+    record = {key:plan[key] for key in ('description','type','category','amountCents','note')}
+    record.update({'id':txid,'date':date_value(paid_date).isoformat(),'plannedId':ident})
+    actions = []
+    if space_id:
+        actions.append(auth_check(space_id,sub))
+        share_record(record,plan.get('paymentSource','fund'))
+        record['createdBy'] = sub
+    actions.append(put_action({'PK':data_pk,'SK':'TX#'+txid,'value':record}))
+    completed = {**plan,'status':'completed','transactionId':txid,
+                 'completedAt':dt.datetime.now(dt.timezone.utc).isoformat(),'completedBy':sub}
+    actions.append(put_action({'PK':data_pk,'SK':'PLAN#'+ident,'value':completed},
+                              '#v.#status = :scheduled', {':scheduled':'scheduled'}))
+    actions[-1]['Put']['ExpressionAttributeNames']={'#v':'value','#status':'status'}
+    if space_id:
+        mirror = mirrored_transaction(space_id,record)
+        actions.append(put_action({'PK':user_key(sub),'SK':'TX#'+mirror['id'],'value':mirror}))
+    txn(actions)
+    return {'completed':True,'transactionId':txid}
+
+
 def state_for(pk):
-    tx, budgets, rules = [], {}, []
+    tx, budgets, rules, planned = [], {}, [], []
     for row in query_user(pk):
         sk = row['SK']
         if sk.startswith('TX#') and not row.get('skipped'):
@@ -566,7 +649,9 @@ def state_for(pk):
             budgets[sk[2:]] = int(row['amountCents'])/100
         elif sk.startswith('REC#'):
             rules.append(public(row['value']))
-    return {'transactions':tx,'budgets':budgets,'recurring':rules}
+        elif sk.startswith('PLAN#'):
+            planned.append(public(row['value']))
+    return {'transactions':tx,'budgets':budgets,'recurring':rules,'planned':planned}
 
 
 def handle_request(event, claims, sub, pk, route, params):
@@ -595,6 +680,67 @@ def handle_request(event, claims, sub, pk, route, params):
         data_pk = space_key(space_id)
     else:
         data_pk = pk
+    if route == 'GET /favorites':
+        return response(200,{'favorites':favorites_for(sub,space_id)})
+    if route == 'POST /favorites':
+        record = validated_favorite(body_json(event))
+        if record['spaceId'] != (space_id or ''):
+            raise BadRequest('Il preferito deve appartenere al bilancio selezionato')
+        if len(list_prefix(pk,'FAV#')) >= FAVORITES_LIMIT:
+            raise BadRequest('Numero massimo di preferiti raggiunto')
+        TABLE.put_item(Item={'PK':pk,'SK':'FAV#'+record['id'],'value':record},
+                       ConditionExpression='attribute_not_exists(PK)')
+        return response(201,public(record))
+    if route == 'DELETE /favorites/{id}':
+        fid = params.get('id')
+        if not isinstance(fid,str) or not ID_RE.fullmatch(fid):
+            raise BadRequest('ID preferito non valido')
+        old = get_row(pk,'FAV#'+fid)
+        if not old or old['value'].get('spaceId','') != (space_id or ''):
+            raise KeyError('Preferito inesistente')
+        TABLE.delete_item(Key={'PK':pk,'SK':'FAV#'+fid},ConditionExpression='attribute_exists(PK)')
+        return response(204)
+    if route in ('POST /planned','PUT /planned/{id}'):
+        rid = params.get('id') if route.startswith('PUT') else None
+        payload = planned_record(body_json(event),rid)
+        old = get_row(data_pk,'PLAN#'+rid) if rid else None
+        if rid and (not old or old['value'].get('status')!='scheduled'):
+            raise BadRequest('Puoi modificare solo scadenze ancora da pagare')
+        if not rid and len(list_prefix(data_pk,'PLAN#')) >= PLANNED_LIMIT:
+            raise BadRequest('Numero massimo di scadenze raggiunto')
+        cond = '#v.#status = :scheduled' if rid else 'attribute_not_exists(PK)'
+        row = {'PK':data_pk,'SK':'PLAN#'+payload['id'],'value':payload}
+        if space_id:
+            action = put_action(row,cond,{':scheduled':'scheduled'} if rid else None)
+            if rid:
+                action['Put']['ExpressionAttributeNames']={'#v':'value','#status':'status'}
+            txn([auth_check(space_id,sub),action])
+        else:
+            params={'Item':row,'ConditionExpression':cond}
+            if rid:
+                params['ExpressionAttributeNames']={'#v':'value','#status':'status'}
+                params['ExpressionAttributeValues']={':scheduled':'scheduled'}
+            TABLE.put_item(**params)
+        return response(200 if rid else 201,public(payload))
+    if route == 'DELETE /planned/{id}':
+        rid = params.get('id')
+        if not isinstance(rid,str) or not ID_RE.fullmatch(rid):
+            raise BadRequest('ID scadenza non valido')
+        old = get_row(data_pk,'PLAN#'+rid)
+        if not old or old['value'].get('status') != 'scheduled':
+            raise BadRequest('Puoi eliminare solo scadenze ancora da pagare')
+        cond='#v.#status = :scheduled'
+        if space_id:
+            action = del_action(data_pk,'PLAN#'+rid,cond,{':scheduled':'scheduled'})
+            action['Delete']['ExpressionAttributeNames']={'#v':'value','#status':'status'}
+            txn([auth_check(space_id,sub),action])
+        else:
+            TABLE.delete_item(Key={'PK':data_pk,'SK':'PLAN#'+rid},ConditionExpression=cond,
+                              ExpressionAttributeNames={'#v':'value','#status':'status'},
+                              ExpressionAttributeValues={':scheduled':'scheduled'})
+        return response(204)
+    if route == 'POST /planned/{id}/complete':
+        return response(200,complete_planned(data_pk,space_id,sub,params.get('id'),body_json(event).get('paidDate')))
     if route == 'GET /state':
         return response(200,state_for(data_pk))
     if route == 'GET /costs':

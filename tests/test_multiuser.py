@@ -59,6 +59,7 @@ class FakeClient:
                 self.table.fail('TransactionCanceledException')
             if cond=='attribute_exists(PK)' and not current:self.table.fail('TransactionCanceledException')
             if cond=='#role <> :owner' and (current or {}).get('role')=='owner':self.table.fail('TransactionCanceledException')
+            if cond=='#v.#status = :scheduled' and (current or {}).get('value',{}).get('status')!='scheduled':self.table.fail('TransactionCanceledException')
             if kind=='Put':changes.append(('put',key))
             elif kind=='Delete':changes.append(('del',key))
         for action in TransactItems:

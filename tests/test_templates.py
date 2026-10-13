@@ -1,6 +1,7 @@
 """Controlli strutturali CloudFormation offline (non sostituisce ValidateTemplate AWS)."""
 from pathlib import Path
 import ast
+import zipfile
 import unittest
 import yaml
 
@@ -47,7 +48,7 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(x['UserPool']['Properties']['AdminCreateUserConfig']['AllowAdminCreateUserOnly'],True)
         self.assertEqual(x['DataTable']['Properties']['BillingMode'],'PROVISIONED')
         routes=[p for v in x.values() if v['Type']=='AWS::ApiGatewayV2::Route' for p in [v['Properties']]]
-        self.assertEqual(len(routes),16)
+        self.assertEqual(len(routes),23)
         self.assertEqual(x['AdminsGroup']['Properties']['GroupName'],'Admins')
         self.assertTrue(all(p['AuthorizationType']=='JWT' and '!Ref' in p['AuthorizerId'] for p in routes))
         self.assertEqual(x['UserPoolDomain']['Properties']['ManagedLoginVersion'],1)
@@ -59,8 +60,16 @@ class TestTemplates(unittest.TestCase):
     def test_generated_python_matches_source(self):
         x=read_template('backend.yml')['Resources']
         source=(ROOT/'lambda'/'index.py').read_text(encoding='utf-8').strip()
-        embedded=x['ApiLambda']['Properties']['Code']['ZipFile'].strip()
-        # CloudFormation riceve Python AST equivalente, senza docstring e commenti.
+        code=x['ApiLambda']['Properties']['Code']
+        self.assertEqual(code['S3Bucket'],{'!Ref':'LambdaCodeBucket'})
+        self.assertEqual(code['S3Key'],{'!Ref':'LambdaCodeKey'})
+        artifact=ROOT/'dist'/'moneta-lambda.zip'
+        self.assertTrue(artifact.exists(),'Esegui python3 scripts/sync_lambda.py')
+        with zipfile.ZipFile(artifact) as z:
+            self.assertEqual(z.namelist(),['index.py'])
+            embedded=z.read('index.py').decode('utf-8')
+        # Lo ZIP pubblicato deve contenere il codice sorgente di Lambda.
+
         class RemoveDocstrings(ast.NodeTransformer):
             def visit_Module(self,node):
                 self.generic_visit(node)
@@ -73,6 +82,7 @@ class TestTemplates(unittest.TestCase):
         strip=lambda code: ast.dump(RemoveDocstrings().visit(ast.parse(code)),include_attributes=False)
         self.assertEqual(strip(source),strip(embedded))
         self.assertLessEqual((ROOT/'cloudformation'/'backend.yml').stat().st_size,51200)
+        self.assertEqual(read_template('backend.yml')['Resources']['DataTable']['DeletionPolicy'],'Retain') if 'DeletionPolicy' in read_template('backend.yml')['Resources']['DataTable'] else None
 
     def test_budget_account_wide(self):
         x=read_template('budget.yml')['Resources']['AccountMonthlyBudget']['Properties']

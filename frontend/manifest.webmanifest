@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "Moneta - Bilanci personali e familiari",
+  "short_name": "Moneta",
+  "description": "Gestisci spese, bilanci condivisi e scadenze in modo sicuro.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a1020",
+  "theme_color": "#0b1223",
+  "lang": "it-IT",
+  "icons": [
+    {"src": "/icons/moneta-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/icons/moneta-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
