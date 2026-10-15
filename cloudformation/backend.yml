@@ -156,6 +156,17 @@ Resources:
                 Effect: Allow
                 Action: cognito-idp:ListUsers
                 Resource: !GetAtt UserPool.Arn
+              - Sid: CognitoAdminUsers
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminUserGlobalSignOut
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: !GetAtt UserPool.Arn
               - Sid: AwsAccountCostRead
                 Effect: Allow
                 Action: ce:GetCostAndUsage
@@ -331,6 +342,33 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: 'GET /costs'
+      Target: !Sub 'integrations/${ApiIntegration}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  ListAdminUsersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /admin/users'
+      Target: !Sub 'integrations/${ApiIntegration}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  CreateAdminUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /admin/users'
+      Target: !Sub 'integrations/${ApiIntegration}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  ManageAdminUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /admin/users/{username}'
       Target: !Sub 'integrations/${ApiIntegration}'
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer

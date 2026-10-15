@@ -1203,6 +1203,61 @@ def state_for(pk):
     return {'transactions':tx,'budgets':budgets,'recurring':rules,'planned':planned}
 
 
+
+def admin_users(route,params,payload,requester_sub):
+    client=boto3.client('cognito-idp')
+    if route == 'GET /admin/users':
+        users=[];pagination=None
+        while True:
+            kwargs={'UserPoolId':USER_POOL_ID,'Limit':60}
+            if pagination:kwargs['PaginationToken']=pagination
+            data=client.list_users(**kwargs)
+            for u in data.get('Users',[]):
+                attrs={a['Name']:a['Value'] for a in u.get('Attributes',[])}
+                users.append({'username':u['Username'],'email':attrs.get('email',''),
+                    'enabled':u.get('Enabled',False),'status':u.get('UserStatus','UNKNOWN'),
+                    'admin':False})
+            pagination=data.get('PaginationToken')
+            if not pagination:break
+        # Member roles are resolved against the real Cognito pool, not client input.
+        for u in users:
+            memberships=client.admin_list_groups_for_user(Username=u['username'],UserPoolId=USER_POOL_ID).get('Groups',[])
+            u['admin']=any(g['GroupName']=='Admins' for g in memberships)
+        return response(200,{'users':users})
+    if route == 'POST /admin/users':
+        email=payload.get('email','')
+        if not isinstance(email,str) or len(email)>254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):
+            raise BadRequest('Email non valida')
+        password=check_admin_password(payload.get('password'))
+        send_email=payload.get('sendEmail') is True
+        kwargs={'UserPoolId':USER_POOL_ID,'Username':email.strip().lower(),
+            'TemporaryPassword':password,'UserAttributes':[{'Name':'email','Value':email.strip().lower()}],
+            'DesiredDeliveryMediums':['EMAIL'] if send_email else [],'MessageAction':'SUPPRESS' if not send_email else 'RESEND'}
+        client.admin_create_user(**kwargs)
+        return response(201,{'created':True})
+    username=params.get('username','')
+    if not isinstance(username,str) or not username or len(username)>254:
+        raise BadRequest('Utente non valido')
+    action=payload.get('action')
+    if action=='resetPassword':
+        client.admin_set_user_password(UserPoolId=USER_POOL_ID,Username=username,
+            Password=check_admin_password(payload.get('password')),Permanent=False)
+    elif action in ('disable','enable'):
+        user=client.admin_get_user(UserPoolId=USER_POOL_ID,Username=username)
+        if action=='disable' and any(a.get('Name')=='sub' and a.get('Value')==requester_sub for a in user.get('UserAttributes',[])):
+            raise BadRequest('Non puoi disabilitare il tuo stesso account')
+        if action=='disable':
+            client.admin_disable_user(UserPoolId=USER_POOL_ID,Username=username)
+            client.admin_user_global_sign_out(UserPoolId=USER_POOL_ID,Username=username)
+        else:client.admin_enable_user(UserPoolId=USER_POOL_ID,Username=username)
+    else:raise BadRequest('Operazione non supportata')
+    return response(200,{'ok':True})
+
+def check_admin_password(value):
+    if not isinstance(value,str) or not (14<=len(value)<=128) or not (re.search('[A-Z]',value) and re.search('[a-z]',value) and re.search('[0-9]',value) and re.search('[^A-Za-z0-9]',value)):
+        raise BadRequest('Password: almeno 14 caratteri con maiuscole, minuscole, numeri e simboli')
+    return value
+
 def handle_request(event, claims, sub, pk, route, params):
     space_id = (event.get('queryStringParameters') or {}).get('spaceId') or None
     if route == 'GET /me':
@@ -1351,6 +1406,10 @@ def handle_request(event, claims, sub, pk, route, params):
         return response(200,complete_planned(data_pk,space_id,sub,params.get('id'),body_json(event).get('paidDate')))
     if route == 'GET /state':
         return response(200,state_for(data_pk))
+    if route in ('GET /admin/users','POST /admin/users','POST /admin/users/{username}'):
+        if not groups_admin(claims):
+            raise PermissionError('Accesso riservato agli amministratori')
+        return admin_users(route,params,body_json(event) if route.startswith('POST') else None,sub)
     if route == 'GET /costs':
         if not groups_admin(claims):
             return response(403,{'error':'Dashboard amministrativa riservata agli Admins'})
