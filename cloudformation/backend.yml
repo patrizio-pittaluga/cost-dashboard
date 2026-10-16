@@ -261,7 +261,7 @@ Resources:
                 Condition:
                   ForAllValues:StringEquals:
                     dynamodb:LeadingKeys: ['SYSTEM#AWS_COSTS']
-                  Null:
+                  "Null:"
                     dynamodb:LeadingKeys: 'false'
               - Sid: LambdaLogs
                 Effect: Allow
