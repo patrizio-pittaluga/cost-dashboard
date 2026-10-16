@@ -26,6 +26,12 @@ Parameters:
   LambdaCodeKey:
     Type: String
     Description: 'Chiave ZIP Lambda con hash del sorgente'
+  AdminCodeKey:
+    Type: String
+    Description: 'Chiave ZIP Lambda admin utenti'
+  CostsCodeKey:
+    Type: String
+    Description: 'Chiave ZIP Lambda dashboard costi'
 
 Conditions:
   HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, '']]
@@ -156,21 +162,6 @@ Resources:
                 Effect: Allow
                 Action: cognito-idp:ListUsers
                 Resource: !GetAtt UserPool.Arn
-              - Sid: CognitoAdminUsers
-                Effect: Allow
-                Action:
-                  - cognito-idp:AdminCreateUser
-                  - cognito-idp:AdminGetUser
-                  - cognito-idp:AdminSetUserPassword
-                  - cognito-idp:AdminDisableUser
-                  - cognito-idp:AdminEnableUser
-                  - cognito-idp:AdminUserGlobalSignOut
-                  - cognito-idp:AdminListGroupsForUser
-                Resource: !GetAtt UserPool.Arn
-              - Sid: AwsAccountCostRead
-                Effect: Allow
-                Action: ce:GetCostAndUsage
-                Resource: '*'
               - Sid: LambdaLogStream
                 Effect: Allow
                 Action:
@@ -197,6 +188,124 @@ Resources:
       Code:
         S3Bucket: !Ref LambdaCodeBucket
         S3Key: !Ref LambdaCodeKey
+  # Security hardening 2.2.7: ruoli distinti, stessi servizi AWS esistenti.
+  AdminUsersLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-admin-users'
+      RetentionInDays: 7
+
+  CostsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-costs'
+      RetentionInDays: 7
+
+  AdminUsersRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cognito-user-administration-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:ListUsers
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminUserGlobalSignOut
+                Resource: !GetAtt UserPool.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${AdminUsersLogGroup.Arn}:*'
+
+  CostsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-costs-and-admin-membership-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LookupCurrentAdmin
+                Effect: Allow
+                Action:
+                  - cognito-idp:ListUsers
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: !GetAtt UserPool.Arn
+              - Sid: BillingRead
+                Effect: Allow
+                Action: ce:GetCostAndUsage
+                Resource: '*'
+              - Sid: CostCacheOnly
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem]
+                Resource: !GetAtt DataTable.Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys: ['SYSTEM#AWS_COSTS']
+                  Null:
+                    dynamodb:LeadingKeys: 'false'
+              - Sid: LambdaLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${CostsLogGroup.Arn}:*'
+
+  AdminUsersLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: AdminUsersLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-admin-users'
+      Runtime: python3.13
+      Handler: admin_users.handler
+      MemorySize: 128
+      Timeout: 20
+      Role: !GetAtt AdminUsersRole.Arn
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          COGNITO_CLIENT_ID: !Ref UserPoolClient
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref AdminCodeKey
+
+  CostsLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: CostsLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-costs'
+      Runtime: python3.13
+      Handler: admin_costs.handler
+      MemorySize: 128
+      Timeout: 20
+      Role: !GetAtt CostsRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DataTable
+          USER_POOL_ID: !Ref UserPool
+          COGNITO_CLIENT_ID: !Ref UserPoolClient
+          MONTHLY_COST_LIMIT_USD: 3
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref CostsCodeKey
+
   HttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
@@ -228,6 +337,38 @@ Resources:
       IntegrationType: AWS_PROXY
       IntegrationUri: !GetAtt ApiLambda.Arn
       PayloadFormatVersion: '2.0'
+
+  AdminUsersIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminUsersLambda.Arn
+      PayloadFormatVersion: '2.0'
+
+  CostsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt CostsLambda.Arn
+      PayloadFormatVersion: '2.0'
+
+  AdminUsersLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AdminUsersLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/admin/users*'
+
+  CostsLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CostsLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/costs'
 
   ReadProfileRoute:
     Type: AWS::ApiGatewayV2::Route
@@ -342,7 +483,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: 'GET /costs'
-      Target: !Sub 'integrations/${ApiIntegration}'
+      Target: !Sub 'integrations/${CostsIntegration}'
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
 
@@ -351,7 +492,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: 'GET /admin/users'
-      Target: !Sub 'integrations/${ApiIntegration}'
+      Target: !Sub 'integrations/${AdminUsersIntegration}'
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
 
@@ -360,7 +501,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: 'POST /admin/users'
-      Target: !Sub 'integrations/${ApiIntegration}'
+      Target: !Sub 'integrations/${AdminUsersIntegration}'
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
 
@@ -369,7 +510,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: 'POST /admin/users/{username}'
-      Target: !Sub 'integrations/${ApiIntegration}'
+      Target: !Sub 'integrations/${AdminUsersIntegration}'
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
 

@@ -21,7 +21,6 @@ LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.WARNING)
 TABLE = boto3.resource('dynamodb').Table(os.environ['TABLE_NAME'])
 CLIENT_ID = os.environ['COGNITO_CLIENT_ID']
-COST_LIMIT = float(os.environ.get('MONTHLY_COST_LIMIT_USD', '3'))
 ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 EXPENSE = frozenset(('Casa', 'Alimentari', 'Trasporti', 'Bollette', 'Salute', 'Svago', 'Shopping', 'Altro'))
@@ -237,44 +236,6 @@ def run_recurring(today=None):
         last = result.get('LastEvaluatedKey')
         if not last:
             return {'created':created,'rules':count,'date':today.isoformat()}
-
-def load_costs(pk):
-    """Una sola chiamata Cost Explorer ogni 24h per utente; query manuale."""
-    now = int(time.time())
-    key = {'PK':pk, 'SK':'COST#CURRENT'}
-    cached = TABLE.get_item(Key=key).get('Item')
-    if cached and int(cached.get('nextRefresh', 0)) > now:
-        return json.loads(cached['payloadJson'])
-    today = dt.datetime.now(dt.timezone.utc).date()
-    first = today.replace(day=1)
-    # End esclusivo. Dati CE possono arrivare con 24-48 ore di ritardo.
-    end = today + dt.timedelta(days=1)
-    try:
-        ce = boto3.client('ce', region_name='us-east-1')
-        result = ce.get_cost_and_usage(TimePeriod={'Start':first.isoformat(), 'End':end.isoformat()},
-            Granularity='DAILY', Metrics=['UnblendedCost'], GroupBy=[{'Type':'DIMENSION','Key':'SERVICE'}])
-    except ClientError as err:
-        code = err.response['Error'].get('Code', 'Unavailable')
-        LOG.warning('Cost Explorer non disponibile: %s', code)
-        return {'available':False, 'message':'Cost Explorer non disponibile: controlla attivazione e permessi.', 'budgetUSD':COST_LIMIT}
-    days, services = {}, {}
-    for period in result.get('ResultsByTime', []):
-        date = period['TimePeriod']['Start']
-        total = Decimal('0')
-        for group in period.get('Groups', []):
-            amount = Decimal(group['Metrics']['UnblendedCost']['Amount'])
-            total += amount
-            name = group['Keys'][0]
-            services[name] = services.get(name, Decimal('0')) + amount
-        days[date] = round(float(total), 4)
-    total = round(float(sum(services.values(), Decimal('0'))), 4)
-    payload = {'available':True, 'month':first.strftime('%Y-%m'), 'currency':'USD',
-               'total':total, 'budgetUSD':COST_LIMIT, 'daily':[{'date':k,'amount':v} for k,v in sorted(days.items())],
-               'services':[{'name':k,'amount':round(float(v),4)} for k,v in sorted(services.items(),key=lambda it:-it[1]) if v>0][:12],
-               'updatedAt':dt.datetime.now(dt.timezone.utc).isoformat(),
-               'scope':'Intero account AWS: non solo Moneta. Importi indicativi, non fattura finale.'}
-    TABLE.put_item(Item={**key,'nextRefresh':now+86400,'payloadJson':json.dumps(payload,ensure_ascii=False)})
-    return payload
 
 # --- Moneta 2.0: accessi per spazio, inviti e contabilità collegata ---
 import hashlib
@@ -1204,60 +1165,6 @@ def state_for(pk):
 
 
 
-def admin_users(route,params,payload,requester_sub):
-    client=boto3.client('cognito-idp')
-    if route == 'GET /admin/users':
-        users=[];pagination=None
-        while True:
-            kwargs={'UserPoolId':USER_POOL_ID,'Limit':60}
-            if pagination:kwargs['PaginationToken']=pagination
-            data=client.list_users(**kwargs)
-            for u in data.get('Users',[]):
-                attrs={a['Name']:a['Value'] for a in u.get('Attributes',[])}
-                users.append({'username':u['Username'],'email':attrs.get('email',''),
-                    'enabled':u.get('Enabled',False),'status':u.get('UserStatus','UNKNOWN'),
-                    'admin':False})
-            pagination=data.get('PaginationToken')
-            if not pagination:break
-        # Member roles are resolved against the real Cognito pool, not client input.
-        for u in users:
-            memberships=client.admin_list_groups_for_user(Username=u['username'],UserPoolId=USER_POOL_ID).get('Groups',[])
-            u['admin']=any(g['GroupName']=='Admins' for g in memberships)
-        return response(200,{'users':users})
-    if route == 'POST /admin/users':
-        email=payload.get('email','')
-        if not isinstance(email,str) or len(email)>254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):
-            raise BadRequest('Email non valida')
-        password=check_admin_password(payload.get('password'))
-        send_email=payload.get('sendEmail') is True
-        kwargs={'UserPoolId':USER_POOL_ID,'Username':email.strip().lower(),
-            'TemporaryPassword':password,'UserAttributes':[{'Name':'email','Value':email.strip().lower()}],
-            'DesiredDeliveryMediums':['EMAIL'] if send_email else [],'MessageAction':'SUPPRESS' if not send_email else 'RESEND'}
-        client.admin_create_user(**kwargs)
-        return response(201,{'created':True})
-    username=params.get('username','')
-    if not isinstance(username,str) or not username or len(username)>254:
-        raise BadRequest('Utente non valido')
-    action=payload.get('action')
-    if action=='resetPassword':
-        client.admin_set_user_password(UserPoolId=USER_POOL_ID,Username=username,
-            Password=check_admin_password(payload.get('password')),Permanent=False)
-    elif action in ('disable','enable'):
-        user=client.admin_get_user(UserPoolId=USER_POOL_ID,Username=username)
-        if action=='disable' and any(a.get('Name')=='sub' and a.get('Value')==requester_sub for a in user.get('UserAttributes',[])):
-            raise BadRequest('Non puoi disabilitare il tuo stesso account')
-        if action=='disable':
-            client.admin_disable_user(UserPoolId=USER_POOL_ID,Username=username)
-            client.admin_user_global_sign_out(UserPoolId=USER_POOL_ID,Username=username)
-        else:client.admin_enable_user(UserPoolId=USER_POOL_ID,Username=username)
-    else:raise BadRequest('Operazione non supportata')
-    return response(200,{'ok':True})
-
-def check_admin_password(value):
-    if not isinstance(value,str) or not (14<=len(value)<=128) or not (re.search('[A-Z]',value) and re.search('[a-z]',value) and re.search('[0-9]',value) and re.search('[^A-Za-z0-9]',value)):
-        raise BadRequest('Password: almeno 14 caratteri con maiuscole, minuscole, numeri e simboli')
-    return value
-
 def handle_request(event, claims, sub, pk, route, params):
     space_id = (event.get('queryStringParameters') or {}).get('spaceId') or None
     if route == 'GET /me':
@@ -1406,14 +1313,9 @@ def handle_request(event, claims, sub, pk, route, params):
         return response(200,complete_planned(data_pk,space_id,sub,params.get('id'),body_json(event).get('paidDate')))
     if route == 'GET /state':
         return response(200,state_for(data_pk))
-    if route in ('GET /admin/users','POST /admin/users','POST /admin/users/{username}'):
-        if not groups_admin(claims):
-            raise PermissionError('Accesso riservato agli amministratori')
-        return admin_users(route,params,body_json(event) if route.startswith('POST') else None,sub)
-    if route == 'GET /costs':
-        if not groups_admin(claims):
-            return response(403,{'error':'Dashboard amministrativa riservata agli Admins'})
-        return response(200,load_costs('SYSTEM#AWS_COSTS'))
+    # Defence-in-depth: route amministrative NON eseguite dalla Lambda finanziaria.
+    if route.startswith(('GET /admin/', 'POST /admin/')) or route == 'GET /costs':
+        raise PermissionError('Endpoint amministrativo isolato')
     if route in ('POST /transactions','PUT /transactions/{id}'):
         rid = params.get('id') if route.startswith('PUT') else None
         payload = body_json(event)
@@ -1477,6 +1379,21 @@ def handle_request(event, claims, sub, pk, route, params):
         rid = params.get('id') if route.startswith('PUT') else None
         payload = body_json(event)
         record = validate_rule(payload,rid)
+        # Solo il modulo Nuovo movimento richiede la registrazione immediata.
+        # Una ricorrenza creata dalla schermata Regole mantiene il vecchio comportamento.
+        record_first = payload.get('recordFirstOccurrence', False)
+        if type(record_first) is not bool:
+            raise BadRequest('Opzione prima scadenza non valida')
+        if rid and record_first:
+            raise BadRequest('La prima scadenza è registrabile solo alla creazione')
+        first_due = (not rid and record_first and record['active'] and
+                     date_value(record['startDate']) <= dt.datetime.now(ZoneInfo('Europe/Rome')).date())
+        first_tx = None
+        if first_due:
+            due = date_value(record['startDate'])
+            txid = 'rec-'+record['id'][:45]+'-'+due.strftime('%Y%m%d')
+            first_tx = {k:record[k] for k in ('description','type','category','note','amountCents')}
+            first_tx.update({'id':txid,'date':due.isoformat(),'recurringId':record['id']})
         if space_id:
             source = payload.get('paymentSource','fund')
             if source not in ('fund','personal'):
@@ -1486,11 +1403,22 @@ def handle_request(event, claims, sub, pk, route, params):
             record['createdBy'] = ((previous or {}).get('value') or {}).get('createdBy',sub)
             actions = [auth_check(space_id,sub),put_action({'PK':data_pk,'SK':'REC#'+record['id'],'value':record},
                                             'attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')]
+            if first_tx:
+                share_record(first_tx, record['paymentSource'])
+                first_tx['createdBy'] = sub
+                actions.append(put_action({'PK':data_pk,'SK':'TX#'+first_tx['id'],'value':first_tx}))
+                mirror = mirrored_transaction(space_id,first_tx)
+                actions.append(put_action({'PK':user_key(sub),'SK':'TX#'+mirror['id'],'value':mirror}))
             txn(actions)
             return response(200 if rid else 201,public(record))
         try:
-            TABLE.put_item(Item={'PK':pk,'SK':'REC#'+record['id'],'value':record},
-                           ConditionExpression='attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')
+            if first_tx:
+                # Regola e primo movimento atomici: nessuna regola orfana se fallisce la creazione.
+                txn([put_action({'PK':pk,'SK':'REC#'+record['id'],'value':record}),
+                     put_action({'PK':pk,'SK':'TX#'+first_tx['id'],'value':first_tx})])
+            else:
+                TABLE.put_item(Item={'PK':pk,'SK':'REC#'+record['id'],'value':record},
+                               ConditionExpression='attribute_exists(PK)' if rid else 'attribute_not_exists(PK)')
         except ClientError as err:
             if err.response['Error']['Code'] == 'ConditionalCheckFailedException':
                 return response(404 if rid else 409,{'error':'Ricorrenza inesistente o duplicata'})

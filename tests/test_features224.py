@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch,MagicMock
 from pathlib import Path
 from test_backend import mod,call,DummyTable
+import admin_users as admin_mod
 ROOT=Path(__file__).resolve().parents[1]
 class Features224(unittest.TestCase):
  def setUp(self):mod.TABLE=DummyTable()
@@ -12,19 +13,19 @@ class Features224(unittest.TestCase):
    client.assert_not_called()
  def test_valid_password_policy(self):
   for pw in ('short','abcdefghijklmnopqrst','SHORT#123456789','Password123456'):
-   with self.assertRaises(mod.BadRequest):mod.check_admin_password(pw)
-  self.assertEqual(mod.check_admin_password('Password#2026Safe'),'Password#2026Safe')
+   with self.assertRaises(ValueError):admin_mod.check_admin_password(pw)
+  self.assertEqual(admin_mod.check_admin_password('Password#2026Safe'),'Password#2026Safe')
  def test_admin_cannot_disable_self(self):
   client=MagicMock()
   client.admin_get_user.return_value={'UserAttributes':[{'Name':'sub','Value':'abc'}]}
   with patch.object(mod.boto3,'client',return_value=client):
-   with self.assertRaises(mod.BadRequest):
-    mod.admin_users('POST /admin/users/{username}',{'username':'abc'}, {'action':'disable'},'abc')
+   with self.assertRaises(ValueError):
+    admin_mod.admin_users('POST /admin/users/{username}',{'username':'abc'}, {'action':'disable'},'abc',client)
   client.admin_disable_user.assert_not_called()
  def test_admin_creates_temporary_not_permanent(self):
   client=MagicMock()
   with patch.object(mod.boto3,'client',return_value=client):
-   result=mod.admin_users('POST /admin/users',{}, {'email':'X@Example.com','password':'Password#2026Safe','sendEmail':False},'abc')
+   result=admin_mod.admin_users('POST /admin/users',{}, {'email':'X@Example.com','password':'Password#2026Safe','sendEmail':False},'abc',client)
   self.assertEqual(result['statusCode'],201)
   args=client.admin_create_user.call_args.kwargs
   self.assertEqual(args['Username'],'x@example.com')

@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Produce ZIP Lambda nella cartella dist, senza dipendenze né credenziali AWS."""
+"""Build reproducible ZIP archives for three restricted Lambda roles; no AWS credentials."""
 from pathlib import Path
 import ast
-import zipfile
 import hashlib
-root=Path(__file__).resolve().parent.parent
-src=(root/'lambda'/'index.py').read_bytes()
-ast.parse(src.decode('utf-8'))
-dst=root/'dist'/'moneta-lambda.zip'
-dst.parent.mkdir(parents=True,exist_ok=True)
-with zipfile.ZipFile(dst,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
-    info=zipfile.ZipInfo('index.py',date_time=(2026,1,1,0,0,0))
-    info.compress_type=zipfile.ZIP_DEFLATED
-    info.external_attr=0o644 << 16
-    z.writestr(info,src)
-print(f'Lambda ZIP: {dst} ({dst.stat().st_size} bytes, sha256={hashlib.sha256(dst.read_bytes()).hexdigest()})')
+import zipfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / 'lambda'
+DIST = ROOT / 'dist'
+DIST.mkdir(parents=True, exist_ok=True)
+BUNDLES = {
+    'moneta-lambda.zip': ('index.py',),
+    'moneta-admin-users.zip': ('admin_users.py', 'admin_auth.py'),
+    'moneta-costs.zip': ('admin_costs.py', 'admin_auth.py'),
+}
+for filename, members in BUNDLES.items():
+    target = DIST / filename
+    with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as out:
+        for module in members:
+            data = (SRC / module).read_bytes()
+            ast.parse(data.decode('utf-8'))
+            info = zipfile.ZipInfo(module, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            out.writestr(info, data)
+    print(f'{target.name}: {target.stat().st_size} bytes, sha256={hashlib.sha256(target.read_bytes()).hexdigest()}')

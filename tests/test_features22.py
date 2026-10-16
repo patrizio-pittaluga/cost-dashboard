@@ -141,4 +141,4 @@ class Ui22Tests(unittest.TestCase):
         for route in ('GET /fund','POST /fund/operations','GET /insights',
                       'POST /capital/items','DELETE /capital/items/{id}'):
             self.assertIn("RouteKey: '"+route+"'",backend)
-        self.assertIn('moneta-static-v2.2.4',(base/'frontend/sw.js').read_text())
+        self.assertIn('moneta-static-v2.2.6',(base/'frontend/sw.js').read_text())

@@ -55,7 +55,11 @@ class TestTemplates(unittest.TestCase):
         self.assertIn('DailyRecurringSchedule',x)
         self.assertEqual(x['DailyRecurringSchedule']['Type'],'AWS::Scheduler::Schedule')
         actions=x['ApiLambdaRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
-        self.assertTrue(any('ce:GetCostAndUsage' in (stmt['Action'] if isinstance(stmt['Action'],list) else [stmt['Action']]) for stmt in actions))
+        self.assertFalse(any('ce:GetCostAndUsage' in (stmt['Action'] if isinstance(stmt['Action'],list) else [stmt['Action']]) for stmt in actions))
+        self.assertIn('CostsRole',x)
+        self.assertIn('AdminUsersRole',x)
+        costs=x['CostsRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
+        self.assertTrue(any('ce:GetCostAndUsage' in (stmt['Action'] if isinstance(stmt['Action'],list) else [stmt['Action']]) for stmt in costs))
 
     def test_generated_python_matches_source(self):
         x=read_template('backend.yml')['Resources']

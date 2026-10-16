@@ -89,3 +89,13 @@
 .tutorial-dialog[open]{display:block;position:fixed;z-index:9998;left:auto;right:clamp(12px,4vw,45px);top:50%;bottom:auto;margin:0;transform:translateY(-50%);max-height:min(680px,calc(100dvh - 30px));overflow-y:auto}
 @media(max-width:700px){.tutorial-dialog[open]{left:12px;right:12px;top:auto;bottom:calc(env(safe-area-inset-bottom) + 12px);transform:none;width:auto;padding:18px;max-height:65dvh}.tutorial-dialog[open].tour-at-top{top:calc(env(safe-area-inset-top) + 10px);bottom:auto}.tutorial-dialog .tutorial-visual{width:48px;height:48px;font-size:26px;margin:8px 0}.tutorial-dialog .tutorial-progress{margin:12px 0}.tutorial-dialog h2{font-size:22px;margin:8px 0}.tutorial-dialog p{font-size:13px;line-height:1.5}.tutorial-dialog .tutorial-actions{margin-top:14px}.tutorial-dialog .tutorial-hint{margin-top:12px}}
 @media(prefers-reduced-motion:reduce){.tour-spotlight{transition:none}}
+
+/* Moneta 2.2.6 – Privacy del saldo: schermatura predefinita e controllo accessibile. */
+.balance-display{display:flex;align-items:center;gap:13px;max-width:100%;position:relative;z-index:3}
+.balance-display .hero-value{margin:15px 0 8px;min-width:0;overflow-wrap:anywhere}
+.balance-display .hero-value[data-balance-masked="true"]{letter-spacing:3px;user-select:none;-webkit-user-select:none}
+.balance-toggle{display:inline-grid;place-items:center;flex:0 0 42px;width:42px;height:42px;border-radius:12px;border:1px solid #7fd6c470;background:#10374399;color:#d6fff2;cursor:pointer;position:relative;z-index:4}
+.balance-toggle:hover,.balance-toggle:focus-visible{background:#20545c;border-color:#8ef3d5;outline-offset:3px}
+.balance-toggle svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.balance-toggle.balance-visible .balance-eye-slash{display:none}
+@media(max-width:560px){.balance-display{gap:9px}.balance-toggle{width:40px;height:40px;flex-basis:40px}.balance-display .hero-value{font-size:clamp(30px,8vw,45px)}}

@@ -57,6 +57,28 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  SecureResponseHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        Comment: 'Header browser di sicurezza; nessun servizio aggiuntivo'
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.execute-api.eu-south-1.amazonaws.com https://*.auth.eu-south-1.amazoncognito.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+            Override: true
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -79,6 +101,7 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: s3-private
           ViewerProtocolPolicy: redirect-to-https
+          ResponseHeadersPolicyId: !Ref SecureResponseHeaders
           AllowedMethods: [GET, HEAD]
           CachedMethods: [GET, HEAD]
           Compress: true
@@ -88,6 +111,7 @@ Resources:
           - PathPattern: config.json
             TargetOriginId: s3-private
             ViewerProtocolPolicy: redirect-to-https
+            ResponseHeadersPolicyId: !Ref SecureResponseHeaders
             AllowedMethods: [GET, HEAD]
             CachedMethods: [GET, HEAD]
             Compress: true

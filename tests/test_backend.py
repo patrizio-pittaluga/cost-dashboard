@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+import sys
 from unittest.mock import patch
 
 os.environ.setdefault('AWS_ACCESS_KEY_ID', 'test')
@@ -16,6 +17,8 @@ source = Path(__file__).resolve().parents[1] / 'lambda' / 'index.py'
 spec = importlib.util.spec_from_file_location('my_lambda', source)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+sys.path.insert(0,str(source.parent))
+import admin_costs as cost_mod
 
 
 class ConditionalError(Exception):
@@ -162,13 +165,14 @@ class BackendTests(unittest.TestCase):
                 return {'ResultsByTime':[{'TimePeriod':{'Start':'2026-10-01'},
                   'Groups':[{'Keys':['Amazon CloudFront'],'Metrics':{'UnblendedCost':{'Amount':'0.17'}}}]}]}
         fake=FakeCE()
-        with patch.object(mod.boto3, 'client', return_value=fake):
-            first=mod.load_costs('USER#a')
-            second=mod.load_costs('USER#a')
+        cost_mod.TABLE=mod.TABLE
+        with patch.object(cost_mod.boto3, 'client', return_value=fake):
+            first=cost_mod.load_costs()
+            second=cost_mod.load_costs()
         self.assertEqual(fake.calls,1)
         self.assertEqual(first,second)
         self.assertEqual(first['total'],0.17)
-        cached=mod.TABLE.items[('USER#a','COST#CURRENT')]
+        cached=mod.TABLE.items[('SYSTEM#AWS_COSTS','COST#CURRENT')]
         self.assertIsInstance(cached['payloadJson'],str)
         self.assertNotIn('payload',cached)
 

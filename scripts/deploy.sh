@@ -38,8 +38,12 @@ if [[ -z "$COGNITO_PREFIX" ]]; then
 fi
 
 printf 'Moneta: deploy stack %s e %s.\n' "$FRONTEND_STACK" "$BACKEND_STACK"
-printf '%s\n' '[1/5] Creazione pacchetto Lambda...' 
+printf '%s\n' '[1/5] Verifica security gate e creazione dei tre pacchetti Lambda...'
+python3 scripts/security_check.py
 python3 scripts/sync_lambda.py
+# Pre-flight API read-only: detect template errors before any resource update.
+aws cloudformation validate-template --region us-east-1 --template-body file://cloudformation/frontend.yml >/dev/null
+aws cloudformation validate-template --region eu-south-1 --template-body file://cloudformation/backend.yml >/dev/null
 
 # Conserva i parametri del dominio nei deploy successivi.
 get_stack_parameter() {
@@ -88,15 +92,23 @@ if ! aws s3api head-bucket --bucket "$CODE_BUCKET" 2>/dev/null; then
 fi
 CODE_HASH="$(sha256sum dist/moneta-lambda.zip | cut -d' ' -f1)"
 CODE_KEY="lambda/moneta-${CODE_HASH}.zip"
-aws s3 cp dist/moneta-lambda.zip "s3://$CODE_BUCKET/$CODE_KEY" \
-  --region eu-south-1 --sse AES256 --only-show-errors
+ADMIN_HASH="$(sha256sum dist/moneta-admin-users.zip | cut -d' ' -f1)"
+ADMIN_KEY="lambda/moneta-admin-users-${ADMIN_HASH}.zip"
+COSTS_HASH="$(sha256sum dist/moneta-costs.zip | cut -d' ' -f1)"
+COSTS_KEY="lambda/moneta-costs-${COSTS_HASH}.zip"
+for spec in "moneta-lambda.zip:$CODE_KEY" "moneta-admin-users.zip:$ADMIN_KEY" "moneta-costs.zip:$COSTS_KEY"; do
+  artifact="${spec%%:*}"
+  object="${spec#*:}"
+  aws s3 cp "dist/$artifact" "s3://$CODE_BUCKET/$object" \
+    --region eu-south-1 --sse AES256 --only-show-errors
+done
 printf '%s\n' '[3/5] Cognito, API HTTP, Lambda Python, DynamoDB (eu-south-1 Milano)...'
 aws cloudformation deploy \
   --region eu-south-1 \
   --stack-name "$BACKEND_STACK" \
   --template-file cloudformation/backend.yml \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" "CustomDomainName=$MONETA_CUSTOM_DOMAIN" "LambdaCodeBucket=$CODE_BUCKET" "LambdaCodeKey=$CODE_KEY" \
+  --parameter-overrides "CloudFrontDomain=$DOMAIN" "CognitoDomainPrefix=$COGNITO_PREFIX" "CustomDomainName=$MONETA_CUSTOM_DOMAIN" "LambdaCodeBucket=$CODE_BUCKET" "LambdaCodeKey=$CODE_KEY" "AdminCodeKey=$ADMIN_KEY" "CostsCodeKey=$COSTS_KEY" \
   --no-fail-on-empty-changeset
 
 API_URL="$(get_output eu-south-1 "$BACKEND_STACK" ApiUrl)"
